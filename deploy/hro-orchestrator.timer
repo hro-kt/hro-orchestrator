@@ -1,0 +1,11 @@
+[Unit]
+Description=10分ごとに司令塔を回す
+
+[Timer]
+# ★冪等なので頻繁でよい。細かく回すほど「起動に失敗した」に早く気づける。
+OnCalendar=*:0/10
+Persistent=true
+Unit=hro-orchestrator.service
+
+[Install]
+WantedBy=timers.target

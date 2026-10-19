@@ -1,0 +1,28 @@
+[tool.poetry]
+name = "hro-orchestrator"
+version = "0.1.0"
+description = "開催日の司令塔。Azure の電源と、当日ジョブの引き金を一元で持つ"
+authors = ["hro"]
+readme = "README.md"
+packages = [{ include = "hro_orchestrator" }]
+
+[tool.poetry.dependencies]
+python = ">=3.10,<3.13"
+click = ">=8.1"
+python-dotenv = ">=1.0"
+pg8000 = ">=1.31"
+psycopg = { version = ">=3.1", extras = ["binary"], markers = "sys_platform != 'win32'" }
+tzdata = ">=2024.1"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.0"
+
+[tool.poetry.scripts]
+hro-orchestrator = "hro_orchestrator.__main__:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

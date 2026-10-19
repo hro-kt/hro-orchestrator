@@ -1,0 +1,19 @@
+[Unit]
+# 開催日の司令塔。★自分が止める VM の上では動かせないので、
+#   常時起動が必要な Linux 機(NAR 収集で毎日要る)に置く。
+Description=hro orchestrator (Azure power + race-day trigger)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=azureuser
+WorkingDirectory=/home/azureuser/hro/hro-orchestrator
+EnvironmentFile=/home/azureuser/hro/hro-orchestrator/.env
+ExecStart=/usr/bin/env bash -lc 'poetry run hro-orchestrator run'
+# ★1周は数秒。長引くなら az か DB が応答していないので、そこで打ち切る
+TimeoutStartSec=300
+# alert があると 1 を返す。異常として記録はするが、次の周回は普通に走る
+SuccessExitStatus=0 1
+StandardOutput=append:/home/azureuser/hro/logs/orchestrator.log
+StandardError=append:/home/azureuser/hro/logs/orchestrator.log
