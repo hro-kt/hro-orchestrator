@@ -57,6 +57,20 @@ systemctl list-timers hro-orchestrator.timer
 ★いきなり自動にしない。まず `plan` を毎日見て、**起こす時刻・投入する時刻・
   止める時刻が意図どおりか**を確かめる。電源の判断を間違えると一日を失う。
 
+## 3.5 ★Windows の agent が「ログイン無し」で上がるか
+
+**自動化の前提**。`az vm start` は Windows を起こすが**誰もログインしない**。
+agent がログイン契機で起動する設定のままだと、VM は立つのに agent は上がらない。
+
+設定と検証の手順は `deploy/WINDOWS_AGENT.md`。非開催日に
+
+```bash
+poetry run hro-orchestrator coldstart-test
+```
+
+を通して `○ 人が触らずに agent が上がりました` を見るまで、timer を
+有効にしないこと。
+
 ## 4. ★死活監視(これが一番大事)
 
 **司令塔自身が落ちたことは、司令塔には報告できない。**

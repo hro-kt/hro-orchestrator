@@ -102,6 +102,49 @@ def run_cmd(dry_run, check_azure) -> None:
     raise SystemExit(1 if out.alerts else 0)
 
 
+@cli.command("coldstart-test")
+@click.option("--timeout-min", type=float, default=15.0,
+              help="agent の応答を待つ上限(分)")
+@click.option("--skip-stop", is_flag=True,
+              help="既に停止しているので、止めずに起こすところから試す")
+@click.option("--force", is_flag=True,
+              help="開催日でも実行する(★その日が終わります)")
+def coldstart_cmd(timeout_min, skip_stop, force) -> None:
+    """★人が一切触らずに agent が上がるかを確かめる。
+
+    `az vm start` は Windows を起こすが**誰もログインしない**。agent が
+    ログイン契機で起動する設定のままだと、VM は立つのに agent は上がらず、
+    司令塔は「応答しません」と鳴らすだけになる。自動化の前提がそこにある。
+
+    ★VM を止めるので、開催日には走らせないこと。
+    """
+    from . import db as dbmod
+    from .coldstart import refuse_reason, run as cold_run
+    from .runner import collect
+
+    cfg, az = _setup(dry_run=False)
+    conn = dbmod.connect(cfg)
+    st = collect(conn, az, cfg)
+    pol = cfg.policy
+    why = refuse_reason(is_race_day=st.is_race_day,
+                        busy=st.busy.get(pol.windows_target, 0))
+    if why and not force:
+        click.echo(f"✗ {why}")
+        click.echo("  (どうしても試すなら --force。★その日が終わります)")
+        raise SystemExit(2)
+
+    click.echo(f"=== 冷間起動の検証: {pol.windows_vm} ===")
+    res = cold_run(vm=pol.windows_vm, target=pol.windows_target,
+                   stop_vm=az.stop, start_vm=az.start,
+                   agent_alive=lambda t: dbmod.live_agents(conn).get(t, False),
+                   timeout_sec=timeout_min * 60.0, skip_stop=skip_stop,
+                   log=click.echo)
+    click.echo("")
+    for line in res.lines():
+        click.echo(line)
+    raise SystemExit(0 if res.ok else 1)
+
+
 def main() -> None:
     cli()
 
