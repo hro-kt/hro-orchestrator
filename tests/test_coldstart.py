@@ -81,19 +81,33 @@ def test_success_reports_how_long_it_took():
 # --------------------------------------------------------------------------- #
 # ★失敗したときに「何をすればよいか」まで言う
 # --------------------------------------------------------------------------- #
-def test_timeout_explains_the_login_trigger_problem():
+def test_timeout_points_at_auto_logon_not_session_zero():
+    """★「ログオンしていなくても実行」は**使えない**。
+
+    それは Session 0(非対話)で走るので JV-Link が動かない
+    (対話的デスクトップを要求する。2026-09 確認)。
+    誤った手順を出すと、開催日に JV-Link が全滅する。
+    """
     res, _ = _run(alive_after=None, timeout_sec=60.0, poll_sec=15.0)
     assert not res.ok
-    assert "ログイン契機" in res.problem
-    assert "ログオンしているかどうかにかかわらず" in res.problem
+    assert "自動ログオン" in res.problem
+    assert "Session 0" in res.problem and "JV-Link が動かない" in res.problem
+
+
+def test_the_hint_does_not_recommend_the_broken_approach():
+    """★間違った助言への逆戻りを防ぐ。"""
+    res, _ = _run(alive_after=None, timeout_sec=30.0, poll_sec=15.0)
+    bad = "ログオンしているかどうかにかかわらず実行"
+    assert bad not in res.problem, "使えない手順を勧めている"
 
 
 def test_the_hint_mentions_the_user_account_requirement():
-    """★JV-Link のサービスキーは HKCU、レシピはプロファイル配下。
-       SYSTEM で走らせると見えない。
+    """★JV-Link のサービスキーは HKCU、レシピ/state はプロファイル配下。
+       別のユーザでログオンさせると、上がっても使えない。
     """
     res, _ = _run(alive_after=None, timeout_sec=30.0, poll_sec=15.0)
-    assert "HKCU" in res.problem and "実行ユーザ" in res.problem
+    assert "HKCU" in res.problem
+    assert "いま運用しているユーザ" in res.problem
 
 
 def test_it_tells_the_operator_not_to_log_in():

@@ -1,46 +1,60 @@
-# Windows の agent を「ログイン無し」で起動させる
+# Windows の agent を「人が触らずに」上げる
 
-★**これが自動化の前提**。`az vm start` は Windows を起こすが、**誰もログインしない**。
-agent がログイン契機で起動する設定のままだと、VM は立つのに agent は上がらず、
-司令塔は「応答しません」と鳴らすだけになる。
+★**これが自動化の前提**。`az vm start` は Windows を起こすが、**誰もログオンしない**。
+agent がログオン契機で起動する設定なら、VM は立つのに agent は上がらない。
 
-## 先に知っておく落とし穴
+## ★先に: 「ログオンしていなくても実行」は**使えない**
 
-- **JV-Link のサービスキーは HKCU(ユーザ単位)**。`SYSTEM` で走らせると見えない
-- IPAT のレシピ(`C:\Users\<user>\ipat_recipe.json`)もプロファイル配下
-- → **「そのユーザとして、ログオン無しで」** 走らせる必要がある
-- そのユーザは **32ビット Python の venv** を使うこと(JV-Link は32ビット COM)
-
-## 設定(タスクスケジューラ)
-
-GUI なら「ユーザーがログオンしているかどうかにかかわらず実行する」を選ぶ。
-コマンドなら:
-
-```powershell
-$User = "$env:COMPUTERNAME\kyosuke.tomoda"
-$Dir  = "C:\Users\kyosuke.tomoda\Documents\hro\hro-operations"
-
-$Action  = New-ScheduledTaskAction -Execute "cmd.exe" `
-  -Argument "/c cd /d $Dir && poetry run hro-ops agent --server windows" `
-  -WorkingDirectory $Dir
-# ★起動直後はネットワークやサービスが揃っていない。1〜2分遅らせる
-$Trigger = New-ScheduledTaskTrigger -AtStartup
-$Trigger.Delay = "PT2M"
-# ★落ちたら上げ直す。開催日に黙って止まるのが一番高い
-$Settings = New-ScheduledTaskSettingsSet -RestartInterval (New-TimeSpan -Minutes 1) `
-  -RestartCount 10 -ExecutionTimeLimit (New-TimeSpan -Hours 0) `
-  -MultipleInstances IgnoreNew -StartWhenAvailable
-
-Register-ScheduledTask -TaskName "hro-agent-windows" -Action $Action `
-  -Trigger $Trigger -Settings $Settings -User $User -RunLevel Highest -Password (Read-Host -AsSecureString)
+```
+Windows 側 agent はタスクスケジューラで ログオン時起動・対話セッション必須
+(JV-Link が対話的デスクトップを要求するため service 不可)   — 2026-09 確認
 ```
 
-`-Password` を渡すと「ログオン無しで実行」になる。パスワードは Windows が
-LSA シークレットとして保持する(タスク定義には平文で残らない)。
+タスクスケジューラの「ユーザーがログオンしているかどうかにかかわらず実行する」は
+**Session 0(非対話)** で走る。**JV-Link はそこでは動かない**。
+同じ理由で Windows サービス化も不可。
 
-★**パスワードを変更したら、このタスクは黙って失敗する**。変更したら登録し直すこと。
+→ **タスクの設定を変えるのではなく、ログオンを自動化する。**
 
-## ★必ず確かめること(推測で済ませない)
+## 解: 自動ログオン(AutoAdminLogon)
+
+OS 起動時に自動でログオンさせれば**対話セッションができ、いまのタスクがそのまま
+発火する**。agent の起動方法は一切変えない(= 壊すリスクが最小)。
+
+副次的な効果もある: Windows Update の自動再起動でランナーが消えて
+**誰も気づかないまま5レースを失った**(2026-10-04)。自動ログオンなら再起動後に
+自力で戻る。
+
+### 設定(Sysinternals Autologon を使う)
+
+```powershell
+# パスワードを平文でレジストリに置かない。LSA シークレットとして暗号化保存される
+.\Autologon64.exe kyosuke.tomoda $env:COMPUTERNAME <パスワード>
+```
+
+GUI でも可(`Autologon64.exe` を起動して入力)。
+レジストリを直接書く方法(`DefaultPassword`)は**平文で残る**ので使わないこと。
+
+### 確認すべきこと
+
+- **NSG で RDP を自IPに限定**しておく(自動ログオンは「常に誰かがログオン状態」になる)
+- **画面ロック/スクリーンセーバーを無効**にする。ロックされると対話セッションが
+  制限され、JV-Link が失敗しうる
+  ```powershell
+  powercfg /change standby-timeout-ac 0
+  powercfg /change monitor-timeout-ac 0
+  ```
+- **RDP で入って「サインアウト」しない**。セッションが消えて agent が落ちる。
+  切るときは「切断(disconnect)」にすること
+- パスワードを変更したら Autologon も登録し直す
+
+### JV-Link のサービスキーとプロファイル
+
+- サービスキーは **HKCU(ユーザ単位)**
+- IPAT のレシピ / netkeiba の state も **プロファイル配下**
+→ 自動ログオンするユーザは、**いま手で運用しているユーザと同じ**であること。
+
+## ★必ず確かめる(推測で済ませない)
 
 設定しただけでは分からない。**人が一切触らずに上がるか**を実際に試す。
 
@@ -50,7 +64,7 @@ poetry run hro-orchestrator coldstart-test
 ```
 
 停止 → 起動 → agent のハートビート待ち、を自動でやる。
-**待っている間、絶対に RDP でログインしないこと**(ログイン契機で上がってしまい、
+**待っている間、絶対に RDP で接続しないこと**(ログオン契機で上がってしまい、
 検証にならない)。開催日は拒否される(VM を止めるので、その日が終わるため)。
 
 ```
@@ -59,15 +73,13 @@ poetry run hro-orchestrator coldstart-test
 
 これが出るまで、司令塔の自動化(timer)を有効にしないこと。
 
-## JV-Link が非対話セッションで動くか
+## その次: JV-Link が本当に動くか
 
-これも `coldstart-test` の後に確かめる。agent が上がっても、JV-Link が
-対話セッションを要求するなら発注まで到達しない。
+agent が上がっても、**JV-Link まで通るか**は別。自動ログオンのセッションは
+通常のログオンと同じはずだが、確かめていないものを前提にしない。
 
-```bash
-# Linux 機から windows 宛にジョブを投げて、結果を見る
-# (admin UI の「ジョブ」から netkeiba_check 相当の win-check でもよい)
+```
+admin UI から windows 宛に `win-check` を投げ、結果だけで判断する
 ```
 
-Windows 側に RDP せず、**ジョブの結果だけで判断する**のが要点。
-RDP で繋ぐと対話セッションができてしまい、本番と条件が変わる。
+**RDP で繋いで確かめない。** 繋ぐと別の対話セッションができて、本番と条件が変わる。

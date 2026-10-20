@@ -62,6 +62,10 @@ systemctl list-timers hro-orchestrator.timer
 **自動化の前提**。`az vm start` は Windows を起こすが**誰もログインしない**。
 agent がログイン契機で起動する設定のままだと、VM は立つのに agent は上がらない。
 
+★「ログオンしていなくても実行」に変えてはいけない。Session 0(非対話)で走るので
+**JV-Link が動かない**(対話的デスクトップを要求する。2026-09 確認)。
+正解は**自動ログオン**で、agent の起動方法は変えない。
+
 設定と検証の手順は `deploy/WINDOWS_AGENT.md`。非開催日に
 
 ```bash
