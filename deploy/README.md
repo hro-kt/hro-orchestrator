@@ -56,3 +56,36 @@ systemctl list-timers hro-orchestrator.timer
 
 ★いきなり自動にしない。まず `plan` を毎日見て、**起こす時刻・投入する時刻・
   止める時刻が意図どおりか**を確かめる。電源の判断を間違えると一日を失う。
+
+## 4. ★死活監視(これが一番大事)
+
+**司令塔自身が落ちたことは、司令塔には報告できない。**
+VM が止まる / ディスクが埋まる / systemd が止まる。どれも「静かに何も起きない」
+形になり、気づくのは夕方になる。これまで潰してきた失敗の形そのもの。
+
+外部の死活監視サービス(healthchecks.io、Better Stack など)で URL を1つ作り、
+
+```bash
+echo 'ORC_HEARTBEAT_URL=https://hc-ping.com/xxxxxxxx' >> .env
+```
+
+猶予(grace)は **30分** を目安に。timer は10分ごとなので、2回落ちたら鳴る。
+
+これが無いと、`hro-orchestrator` を入れたこと自体が
+**「一日を失う新しい経路」を増やしただけ**になる。
+
+## なぜ hro-calc-prod1 に置くのか
+
+DB が VNet 内の私設 PostgreSQL なので、素のサーバレス(Functions / Automation)
+からは届かない。司令塔は開催日判定・agent の生死・ジョブ投入のすべてで DB を
+使うので、**VNet の中にいる必要がある**。
+
+| 候補 | 可否 | 備考 |
+|---|---|---|
+| hro-calc-prod1 | ◎ | 既に VNet 内。NAR 収集で常時起動。追加コスト0 |
+| hro-admin-prod1 | ○ | 同じく VNet 内。負荷は軽い |
+| Azure Functions | △ | VNet 統合に Premium/Flex が要る |
+| Automation Account | △ | DB に届かせるには Hybrid Worker(=結局 VM) |
+| Container Apps Job | ○ | VNet 可。イメージの構築・配備が増える |
+
+置き場所より**死活監視の有無**の方が効く。どこに置いても VM は落ちる。

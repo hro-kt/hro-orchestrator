@@ -95,7 +95,24 @@ def _date_of(actions: list[Action], cfg: Config) -> str:
 
 
 def tick(conn, az: AzureVms, cfg: Config, *, dry_run: bool = False,
-         now: datetime | None = None, alert=None) -> Outcome:
+         now: datetime | None = None, alert=None, heartbeat=None) -> Outcome:
     """1周。★冪等。何度呼んでも安全。"""
     st = collect(conn, az, cfg, now=now)
-    return execute(conn, az, cfg, plan(st, cfg.policy), dry_run=dry_run, alert=alert)
+    out = execute(conn, az, cfg, plan(st, cfg.policy), dry_run=dry_run, alert=alert)
+    # ★alert の有無に関わらず送る。目的が違う:
+    #     heartbeat が途切れる = 司令塔が動いていない(外部が鳴る)
+    #     alert が来る         = 司令塔は動いているが状況が悪い
+    #   dry-run でも送る。「timer が回っているか」の確認にもなる。
+    if heartbeat is not None:
+        try:
+            heartbeat(_summary(st, out))
+        except Exception as e:      # noqa: BLE001 - 通知で1周を壊さない
+            log.warning("heartbeat に失敗: %s", e)
+    return out
+
+
+def _summary(st: DayState, out: Outcome) -> str:
+    """ping に添える1行。外部の監視画面で状況が読めるように。"""
+    head = f"{st.date} {'開催日' if st.is_race_day else '非開催'}"
+    acts = ", ".join(a.kind for a in out.actions) or "なし"
+    return f"{head} / 行動: {acts}" + (f" / 異常: {len(out.alerts)}" if out.alerts else "")

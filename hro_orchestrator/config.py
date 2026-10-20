@@ -29,6 +29,9 @@ class Config:
     flow_args_json: str = ""
     # 通知先(未設定ならログだけ)
     alert_webhook: str = ""
+    # ★死活監視。1周ごとに ping し、**途切れたら外部が鳴る**。
+    #   司令塔自身が落ちたことは司令塔には報告できないので、これだけは外部に置く。
+    heartbeat_url: str = ""
 
 
 def _f(key: str, default: float) -> float:
@@ -58,4 +61,5 @@ def load_config() -> Config:
     return Config(postgres=pg, policy=pol,
                   resource_group=e("ORC_RESOURCE_GROUP", "prod1"),
                   flow_args_json=e("ORC_FLOW_ARGS", ""),
-                  alert_webhook=e("ORC_ALERT_WEBHOOK", ""))
+                  alert_webhook=e("ORC_ALERT_WEBHOOK", ""),
+                  heartbeat_url=e("ORC_HEARTBEAT_URL", ""))

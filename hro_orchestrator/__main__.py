@@ -83,8 +83,18 @@ def run_cmd(dry_run, check_azure) -> None:
             for p in probs:
                 click.echo(f"✗ {p}")
             raise SystemExit(2)
+    from .notify import alert as send_alert
+    from .notify import heartbeat as send_heartbeat
+
     conn = dbmod.connect(cfg)
-    out = tick(conn, az, cfg, dry_run=dry_run)
+    out = tick(conn, az, cfg, dry_run=dry_run,
+               alert=(lambda m: send_alert(cfg.alert_webhook, m))
+               if cfg.alert_webhook else None,
+               heartbeat=(lambda d: send_heartbeat(cfg.heartbeat_url, detail=d))
+               if cfg.heartbeat_url else None)
+    if not cfg.heartbeat_url:
+        click.echo("  ※ ORC_HEARTBEAT_URL が未設定です。"
+                   "**司令塔自身が落ちたことに誰も気づけません**")
     for a in out.actions:
         click.echo(f"  {a}")
     for d in out.done:
