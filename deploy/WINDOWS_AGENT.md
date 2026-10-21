@@ -25,28 +25,69 @@ OS 起動時に自動でログオンさせれば**対話セッションができ
 **誰も気づかないまま5レースを失った**(2026-10-04)。自動ログオンなら再起動後に
 自力で戻る。
 
-### 設定(Sysinternals Autologon を使う)
+### 手順
+
+**1) Sysinternals Autologon を入れる**
 
 ```powershell
-# パスワードを平文でレジストリに置かない。LSA シークレットとして暗号化保存される
-.\Autologon64.exe kyosuke.tomoda $env:COMPUTERNAME <パスワード>
+# 管理者 PowerShell で
+Invoke-WebRequest https://download.sysinternals.com/files/AutoLogon.zip -OutFile $env:TEMP\al.zip
+Expand-Archive $env:TEMP\al.zip -DestinationPath $env:TEMP\al -Force
 ```
 
-GUI でも可(`Autologon64.exe` を起動して入力)。
-レジストリを直接書く方法(`DefaultPassword`)は**平文で残る**ので使わないこと。
+**2) 設定する**
 
-### 確認すべきこと
+```powershell
+# ★ドメイン参加していないなら、ドメインは「コンピュータ名」
+& "$env:TEMP\al\Autologon64.exe" kyosuke.tomoda $env:COMPUTERNAME '<パスワード>'
+```
 
-- **NSG で RDP を自IPに限定**しておく(自動ログオンは「常に誰かがログオン状態」になる)
-- **画面ロック/スクリーンセーバーを無効**にする。ロックされると対話セッションが
-  制限され、JV-Link が失敗しうる
-  ```powershell
-  powercfg /change standby-timeout-ac 0
-  powercfg /change monitor-timeout-ac 0
-  ```
-- **RDP で入って「サインアウト」しない**。セッションが消えて agent が落ちる。
-  切るときは「切断(disconnect)」にすること
-- パスワードを変更したら Autologon も登録し直す
+初回は EULA の同意ダイアログが出る(`/accepteula` を付けると省ける)。
+引数なしで起動すれば GUI でも入力できる。
+
+★**レジストリを直接書く方法(`DefaultPassword`)は使わない。** 平文で残る。
+  Autologon は **LSA シークレット**として暗号化保存する。
+
+**3) 画面ロックを無効にする**
+
+ロックされると対話セッションが制限され、JV-Link が失敗しうる。
+
+```powershell
+powercfg /change standby-timeout-ac 0
+powercfg /change monitor-timeout-ac 0
+# スクリーンセーバーと、無操作でのロックを止める
+reg add "HKCU\Control Panel\Desktop" /v ScreenSaveActive /t REG_SZ /d 0 /f
+reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" `
+  /v InactivityTimeoutSecs /t REG_DWORD /d 0 /f
+```
+
+**4) ★agent が2本立たないようにする**
+
+自動ログオンを入れると、「ログオン時」のタスクが **2回**発火する:
+起動時の自動ログオンと、あなたの RDP ログオン(同じユーザ、別セッション)。
+agent が2本になると同じ待ち行列からジョブを奪い合い、**同じレースを2回買う**。
+
+```powershell
+# タスクを「既に実行中なら新しいインスタンスを開始しない」に
+$t = Get-ScheduledTask -TaskName "<タスク名>"
+$t.Settings.MultipleInstances = 'IgnoreNew'
+Set-ScheduledTask -TaskName "<タスク名>" -Settings $t.Settings
+```
+
+ランチャ側(`hro-operations/scripts/run-agent-windows.ps1`)にも、既に agent が
+走っていれば起動しない防御を入れてある。**両方効かせること。**
+
+### 運用上の注意
+
+- **RDP を切るときは「サインアウト」ではなく「切断」。** サインアウトすると
+  セッションが消えて agent が落ちる
+- Windows Server なので、RDP は**別セッション**になり、自動ログオンの
+  コンソールセッション(と agent)はそのまま残る
+- **NSG で RDP を自IPに限定**しておく(常に誰かがログオン状態になるため)
+- **パスワードを変更したら Autologon を登録し直す**。しないと起動時に
+  ログオンできず、agent も上がらない
+- `HRO_HOME` の既定は `C:\hro` だが、この機の実体は
+  `C:\Users\kyosuke.tomoda\Documents\hro`。ランチャの値を確認すること
 
 ### JV-Link のサービスキーとプロファイル
 
