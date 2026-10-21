@@ -33,8 +33,11 @@ SELECT target, count(*)::int FROM ops_job
 """
 
 # ★agent は pull 型。last_seen を自分で書き、こちらが古さを測る。
+# ★主キーの列名は **server**(name ではない)。そしてその値が ops_job.target と
+#   同じ語彙("windows" / "vm")。ここを取り違えると agent を永久に見つけられず、
+#   「VM は立つのに投入されない」で一日を失う。
 _SQL_AGENTS = """
-SELECT name, EXTRACT(EPOCH FROM (now() - last_seen))::int AS age
+SELECT server, EXTRACT(EPOCH FROM (now() - last_seen))::int AS age
   FROM ops_agent
 """
 
@@ -97,10 +100,10 @@ def busy_by_target(conn) -> dict[str, int]:
 
 
 def live_agents(conn, *, max_age_sec: int = 60) -> dict[str, bool]:
-    """★agent 名はそのまま target として使われている(windows / vm)。"""
+    """{target: 生きているか}。★ops_agent.server が ops_job.target と同じ語彙。"""
     out: dict[str, bool] = {}
-    for name, age in _rows(conn, _SQL_AGENTS):
-        out[str(name)] = age is not None and int(age) <= max_age_sec
+    for server, age in _rows(conn, _SQL_AGENTS):
+        out[str(server)] = age is not None and int(age) <= max_age_sec
     return out
 
 
