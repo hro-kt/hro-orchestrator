@@ -39,6 +39,8 @@ class VmState:
     running: bool
     # ★「電源が入っている」と「使える」は別。az から見た状態をそのまま持つ。
     power: str = ""
+    # ★起動中/停止中。ここを「止まっている」と読むと、起動中に起動を打ち直す。
+    transitioning: bool = False
 
 
 @dataclass
@@ -83,6 +85,11 @@ def plan(st: DayState, pol: Policy = Policy()) -> list[Action]:
     """次にやるべき行動。空なら何もしない。"""
     acts: list[Action] = []
     win = st.vms.get(pol.windows_vm)
+
+    # ★遷移中は何もしない。起動中に起動を打ち直すと、ログが汚れて
+    #   「何が起きているか分からない」状態になる。次の周回で落ち着く。
+    if win is not None and win.transitioning:
+        return [Action(WAIT, pol.windows_vm, f"遷移中です({win.power})")]
 
     if not st.is_race_day:
         return _plan_idle(st, pol, win)

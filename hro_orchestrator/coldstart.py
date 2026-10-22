@@ -47,7 +47,7 @@ def refuse_reason(*, is_race_day: bool, busy: int) -> str | None:
 
 def run(*, vm: str, target: str, stop_vm, start_vm, agent_alive,
         timeout_sec: float = 900.0, poll_sec: float = 15.0,
-        skip_stop: bool = False, sleep=time.sleep,
+        skip_stop: bool = False, sleep=time.sleep, wait_stopped=None,
         now=lambda: datetime.now().timestamp(), log=print) -> ColdStartResult:
     """停止 → 起動 → agent のハートビートを待つ。
 
@@ -62,8 +62,13 @@ def run(*, vm: str, target: str, stop_vm, start_vm, agent_alive,
     if not skip_stop:
         _say(f"{vm} を停止します(deallocate)")
         stop_vm(vm)
-        # ★止めた直後に起こすと、Azure 側が遷移中で弾くことがある
-        sleep(min(30.0, poll_sec * 2))
+        # ★停止の**完了**を待ってから起こす。遷移中に起動を投げると弾かれる。
+        #   停止/起動は --no-wait で投げるので、待つのはこちらの役目。
+        if wait_stopped is not None and not wait_stopped(vm):
+            return ColdStartResult(
+                ok=False, steps=steps,
+                problem=f"{vm} が停止しきりません。Azure ポータルで状態を確認してください")
+        _say(f"{vm} は停止しました")
     _say(f"{vm} を起動します")
     start_vm(vm)
     _say(f"agent({target})のハートビートを待ちます "

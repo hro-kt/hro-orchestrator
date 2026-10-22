@@ -35,9 +35,9 @@ def collect(conn, az: AzureVms, cfg: Config, *, now: datetime | None = None) -> 
     date = now.strftime("%Y%m%d")
     first, last, n = dbmod.posts(conn, date)
     pol = cfg.policy
+    transitioning = False
     try:
-        running = az.is_running(pol.windows_vm)
-        power = "running" if running else "stopped"
+        running, transitioning, power = az.state(pol.windows_vm)
     except Exception as e:      # noqa: BLE001 - 読めないことは「止まっている」ではない
         log.error("VM の電源状態を読めません: %s", e)
         running, power = True, f"unknown({type(e).__name__})"
@@ -46,7 +46,7 @@ def collect(conn, az: AzureVms, cfg: Config, *, now: datetime | None = None) -> 
     return DayState(
         now=now, date=date, is_race_day=n > 0,
         first_post=first, last_post=last,
-        vms={pol.windows_vm: VmState(pol.windows_vm, running, power)},
+        vms={pol.windows_vm: VmState(pol.windows_vm, running, power, transitioning)},
         agents=dbmod.live_agents(conn),
         jobs=dbmod.job_status(conn, date),
         busy=dbmod.busy_by_target(conn))

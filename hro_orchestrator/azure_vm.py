@@ -18,6 +18,9 @@ from dataclasses import dataclass
 
 RUNNING = "VM running"
 DEALLOCATED = "VM deallocated"
+STOPPED = "VM stopped"
+# ★遷移中。ここを「止まっている」と誤読すると、起動中に起動を打ち直し続ける。
+TRANSITIONAL = ("VM starting", "VM stopping", "VM deallocating")
 
 
 class AzureError(RuntimeError):
@@ -28,7 +31,9 @@ class AzureError(RuntimeError):
 class AzureVms:
     resource_group: str
     dry_run: bool = False
-    timeout_sec: float = 300.0
+    # ★起動/停止は --no-wait で投げるので、これは「az が応答するまで」の上限。
+    #   待つ必要があるときは wait_for_power() で**こちらが**ポーリングする。
+    timeout_sec: float = 120.0
     # 差し替え用(テスト)。None なら subprocess を使う
     runner = None
 
@@ -64,18 +69,50 @@ class AzureVms:
     def is_running(self, name: str) -> bool:
         return self.power_state(name) == RUNNING
 
+    def state(self, name: str) -> tuple[bool, bool, str]:
+        """(running, transitioning, 生の状態)。
+
+        ★遷移中(VM starting / stopping / deallocating)を「止まっている」と
+          読むと、起動中にもう一度起動を打つ。Azure は受けるが、ログが汚れ、
+          何が起きているか分からなくなる。
+        """
+        raw = self.power_state(name)
+        return raw == RUNNING, raw in TRANSITIONAL, raw
+
+    def wait_for_power(self, name: str, want: str, *, timeout_sec: float = 600.0,
+                       poll_sec: float = 10.0, sleep=None) -> bool:
+        """その状態になるまで待つ。★待つのは az ではなく**こちら**。"""
+        import time as _t
+        sleep = sleep or _t.sleep
+        deadline = _t.monotonic() + timeout_sec
+        while True:
+            try:
+                if self.power_state(name) == want:
+                    return True
+            except AzureError:
+                pass                      # 遷移中は読めないことがある
+            if _t.monotonic() >= deadline:
+                return False
+            sleep(poll_sec)
+
     # ---- 書く(dry_run では何もしない) --------------------------------------
     def start(self, name: str) -> bool:
+        """★--no-wait。司令塔はポーリング型なので、完了を待つ必要がない。
+
+        既定の `az vm start` は**完了まで待つ**。Windows の冷間起動は数分かかり、
+        subprocess のタイムアウトで落ちた(2026-10-22)。投げたら次の周回で観測する。
+        """
         if self.dry_run:
             return False
-        self._az(["vm", "start", "-g", self.resource_group, "-n", name])
+        self._az(["vm", "start", "--no-wait", "-g", self.resource_group, "-n", name])
         return True
 
     def stop(self, name: str) -> bool:
         """★deallocate する。`vm stop` だけでは課金が止まらない。"""
         if self.dry_run:
             return False
-        self._az(["vm", "deallocate", "-g", self.resource_group, "-n", name])
+        self._az(["vm", "deallocate", "--no-wait",
+                  "-g", self.resource_group, "-n", name])
         return True
 
     def preflight(self) -> list[str]:

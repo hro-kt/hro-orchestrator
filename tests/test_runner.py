@@ -28,6 +28,12 @@ class _Az(AzureVms):
             raise RuntimeError("az が応答しません")
         return self._running
 
+    def state(self, name):
+        if self._fail:
+            raise RuntimeError("az が応答しません")
+        return (self._running, False,
+                "VM running" if self._running else "VM deallocated")
+
     def start(self, name):
         self.started.append(name)
         return True
@@ -171,3 +177,70 @@ def test_all_time_policy_lives_in_plan():
     assert "timedelta(" in plan_src
     # runner が時刻演算を持たない(now() の取得だけは許す)
     assert "timedelta(" not in run_src, "runner に時刻の判断が漏れている"
+
+
+# --------------------------------------------------------------------------- #
+# ★遷移中(起動中/停止中)は何もしない
+# --------------------------------------------------------------------------- #
+class _AzTrans(AzureVms):
+    def __init__(self, raw):
+        super().__init__(resource_group="rg")
+        self.raw = raw
+        self.started, self.stopped = [], []
+
+    def state(self, name):
+        from hro_orchestrator.azure_vm import RUNNING, TRANSITIONAL
+        return self.raw == RUNNING, self.raw in TRANSITIONAL, self.raw
+
+    def start(self, name):
+        self.started.append(name)
+
+    def stop(self, name):
+        self.stopped.append(name)
+
+
+def test_a_transitioning_vm_is_left_alone(monkeypatch):
+    """★起動中に起動を打ち直さない。
+
+    2026-10-22: az vm start が既定で完了まで待ち、300秒で落ちた。
+    --no-wait に変えた結果、次の周回では「起動中」が見える。
+    そこを「止まっている」と読むと、10分ごとに起動を打ち続ける。
+    """
+    monkeypatch.setattr(R.dbmod, "posts", lambda c, d: (None, None, 0))
+    monkeypatch.setattr(R.dbmod, "live_agents", lambda c, **k: {})
+    monkeypatch.setattr(R.dbmod, "job_status", lambda c, d: {})
+    monkeypatch.setattr(R.dbmod, "busy_by_target", lambda c: {})
+    for raw in ("VM starting", "VM deallocating", "VM stopping"):
+        az = _AzTrans(raw)
+        out = R.tick(object(), az, _cfg(),
+                     now=datetime(2026, 10, 22, 12, tzinfo=JST))
+        assert az.started == [] and az.stopped == [], (raw, out.actions)
+        assert any("遷移中" in a.reason for a in out.actions), raw
+
+
+def test_start_and_stop_use_no_wait():
+    """★az vm start は既定で完了まで待つ。Windows の冷間起動は数分かかり、
+       subprocess のタイムアウトで落ちた(2026-10-22)。
+       司令塔はポーリング型なので、投げたら次の周回で観測すればよい。
+    """
+    seen = []
+    az = AzureVms(resource_group="rg")
+    az.runner = lambda args: seen.append(args) or "[]"
+    az.start("v")
+    az.stop("v")
+    assert "--no-wait" in seen[0] and "--no-wait" in seen[1]
+
+
+def test_wait_for_power_polls_until_the_wanted_state():
+    """待つのは az ではなく**こちら**。"""
+    seq = ["VM deallocating", "VM deallocating", "VM deallocated"]
+    az = AzureVms(resource_group="rg")
+    az.power_state = lambda name: seq.pop(0)
+    assert az.wait_for_power("v", "VM deallocated", poll_sec=0, sleep=lambda s: None)
+
+
+def test_wait_for_power_gives_up():
+    az = AzureVms(resource_group="rg")
+    az.power_state = lambda name: "VM deallocating"
+    assert az.wait_for_power("v", "VM deallocated", timeout_sec=0.0,
+                             poll_sec=0, sleep=lambda s: None) is False

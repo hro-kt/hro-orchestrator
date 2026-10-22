@@ -36,6 +36,7 @@ def _run(alive_after=None, **kw):
         n["i"] += 1
         return alive_after is not None and n["i"] >= alive_after
 
+    kw.setdefault("wait_stopped", lambda v: True)
     return run(vm="win1", target="windows",
                stop_vm=calls["stop"].append, start_vm=calls["start"].append,
                agent_alive=_alive, sleep=c.sleep, now=c.now,
@@ -114,3 +115,30 @@ def test_it_tells_the_operator_not_to_log_in():
     """★人が RDP すると、ログイン契機で上がってしまい**検証にならない**。"""
     res, _ = _run(alive_after=1)
     assert any("ログインしないでください" in s for s in res.steps)
+
+
+def test_it_waits_for_the_stop_to_complete_before_starting():
+    """★遷移中に起動を投げると弾かれる。停止/起動は --no-wait なので、
+       待つのはこちらの役目。
+    """
+    order = []
+    c = _Clock()
+    res = run(vm="win1", target="windows",
+              stop_vm=lambda v: order.append("stop"),
+              start_vm=lambda v: order.append("start"),
+              wait_stopped=lambda v: order.append("waited") or True,
+              agent_alive=lambda t: True, sleep=c.sleep, now=c.now,
+              log=lambda m: None)
+    assert res.ok
+    assert order == ["stop", "waited", "start"]
+
+
+def test_it_gives_up_if_the_vm_never_stops():
+    c = _Clock()
+    res = run(vm="win1", target="windows",
+              stop_vm=lambda v: None, start_vm=lambda v: (_ for _ in ()).throw(
+                  AssertionError("停止しきっていないのに起動している")),
+              wait_stopped=lambda v: False,
+              agent_alive=lambda t: True, sleep=c.sleep, now=c.now,
+              log=lambda m: None)
+    assert not res.ok and "停止しきりません" in res.problem

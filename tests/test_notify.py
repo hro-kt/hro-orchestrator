@@ -27,6 +27,9 @@ class _Az(AzureVms):
     def is_running(self, name):
         return True
 
+    def state(self, name):
+        return True, False, "VM running"
+
 
 def _state(race_day=True):
     return DayState(now=datetime(2026, 10, 24, 12, tzinfo=JST), date="20261024",
