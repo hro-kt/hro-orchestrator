@@ -67,18 +67,28 @@ az role definition create --role-definition vmpower.json
 
 ★`AssignableScopes` は「このロールを**割り当てられる範囲**」であって、
   実際に効く範囲ではない。実際の範囲は次の割り当てで決まる。
-★作成直後は反映に1分ほどかかる。`az role definition list --name "HRO VM Power"`
-  で見えるようになってから次へ。
+★作成直後は**名前での解決が数分効かない**。次の割り当てで
+  「Role 'HRO VM Power' doesn't exist.」と出ても、作成は成功している。
+  名前ではなく ID で指定すれば待たずに済む(次節)。
 
 ### 1-3. 対象 VM **だけ**に割り当てる
 
 ```bash
 PRINCIPAL=$(az vm show -g prod1 -n hro-calc-prod1 --query identity.principalId -o tsv)
 SCOPE=$(az vm show -g prod1 -n hro-sync-prod2 --query id -o tsv)   # 止めたい機
+[ -n "$PRINCIPAL" ] || echo "✗ マネージドID が付いていません(1-1 をやり直す)"
+
+# ★ロールは**名前ではなく ID** で指定する。作成直後は名前での解決が数分効かず、
+#   「Role 'HRO VM Power' doesn't exist.」になる(作成自体は成功している)。
+ROLE_ID=$(az role definition list --name "HRO VM Power" --query "[0].id" -o tsv)
+until [ -n "$ROLE_ID" ]; do
+  echo "ロールの反映を待っています…"; sleep 20
+  ROLE_ID=$(az role definition list --name "HRO VM Power" --query "[0].id" -o tsv)
+done
 
 az role assignment create --assignee-object-id "$PRINCIPAL" \
   --assignee-principal-type ServicePrincipal \
-  --role "HRO VM Power" --scope "$SCOPE"
+  --role "$ROLE_ID" --scope "$SCOPE"
 ```
 
 ★`--assignee` ではなく `--assignee-object-id` + `--assignee-principal-type` を
