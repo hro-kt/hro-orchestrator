@@ -82,7 +82,7 @@ def test_heartbeat_is_sent_even_when_there_is_an_alert(monkeypatch):
     """
     beats = []
     _tick_with(monkeypatch, [Action(ALERT, "windows", "agent が死んでいます")],
-               heartbeat=beats.append)
+               heartbeat=lambda d, failed=False: beats.append(d))
     assert len(beats) == 1
     assert "異常" in beats[0]
 
@@ -90,7 +90,7 @@ def test_heartbeat_is_sent_even_when_there_is_an_alert(monkeypatch):
 def test_heartbeat_is_sent_when_nothing_happens(monkeypatch):
     """★何もしない日こそ ping が要る。止まっているのか正常なのか区別できない。"""
     beats = []
-    _tick_with(monkeypatch, [], heartbeat=beats.append)
+    _tick_with(monkeypatch, [], heartbeat=lambda d, failed=False: beats.append(d))
     assert len(beats) == 1
     assert "行動: なし" in beats[0]
 
@@ -98,12 +98,12 @@ def test_heartbeat_is_sent_when_nothing_happens(monkeypatch):
 def test_heartbeat_is_sent_in_dry_run(monkeypatch):
     """timer が回っているかの確認にもなる。"""
     beats = []
-    _tick_with(monkeypatch, [Action(WAIT, "", "まだ")], dry_run=True, heartbeat=beats.append)
+    _tick_with(monkeypatch, [Action(WAIT, "", "まだ")], dry_run=True, heartbeat=lambda d, failed=False: beats.append(d))
     assert len(beats) == 1
 
 
 def test_a_failing_heartbeat_does_not_break_the_tick(monkeypatch):
-    def _boom(detail):
+    def _boom(detail, failed=False):
         raise RuntimeError("ping 失敗")
 
     out = _tick_with(monkeypatch, [], heartbeat=_boom)
@@ -112,5 +112,53 @@ def test_a_failing_heartbeat_does_not_break_the_tick(monkeypatch):
 
 def test_summary_tells_what_happened(monkeypatch):
     beats = []
-    _tick_with(monkeypatch, [Action(WAIT, "", "x")], heartbeat=beats.append)
+    _tick_with(monkeypatch, [Action(WAIT, "", "x")], heartbeat=lambda d, failed=False: beats.append(d))
     assert "20261024" in beats[0] and "開催日" in beats[0]
+
+
+# --------------------------------------------------------------------------- #
+# ★異常は /fail で即座に鳴らす
+# --------------------------------------------------------------------------- #
+def test_failure_pings_the_fail_endpoint(monkeypatch):
+    """★死活監視が「動いていない」しか拾えないと、
+       『動いているが agent が上がらない』を取り逃す。
+    """
+    seen = {}
+    monkeypatch.setattr(notify, "_post",
+                        lambda url, body, ct: seen.update(url=url) or True)
+    notify.heartbeat("https://hc-ping.com/abc", failed=True)
+    assert seen["url"] == "https://hc-ping.com/abc/fail"
+
+
+def test_success_pings_the_plain_url(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(notify, "_post",
+                        lambda url, body, ct: seen.update(url=url) or True)
+    notify.heartbeat("https://hc-ping.com/abc")
+    assert seen["url"] == "https://hc-ping.com/abc"
+
+
+def test_a_trailing_slash_does_not_break_the_fail_url(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(notify, "_post",
+                        lambda url, body, ct: seen.update(url=url) or True)
+    notify.heartbeat("https://hc-ping.com/abc/", failed=True)
+    assert seen["url"] == "https://hc-ping.com/abc/fail"
+
+
+def test_an_alert_makes_the_tick_ping_fail(monkeypatch):
+    got = {}
+    monkeypatch.setattr(R, "collect", lambda *a, **k: _state())
+    monkeypatch.setattr(R, "plan", lambda st, pol: [Action(ALERT, "windows", "死んでいます")])
+    R.tick(object(), _Az(), Config(),
+           heartbeat=lambda d, failed=False: got.update(detail=d, failed=failed))
+    assert got["failed"] is True
+
+
+def test_a_normal_tick_pings_success(monkeypatch):
+    got = {}
+    monkeypatch.setattr(R, "collect", lambda *a, **k: _state())
+    monkeypatch.setattr(R, "plan", lambda st, pol: [Action(WAIT, "", "まだ")])
+    R.tick(object(), _Az(), Config(),
+           heartbeat=lambda d, failed=False: got.update(failed=failed))
+    assert got["failed"] is False

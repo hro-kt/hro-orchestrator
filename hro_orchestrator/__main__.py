@@ -109,7 +109,8 @@ def run_cmd(dry_run, check_azure) -> None:
     out = tick(conn, az, cfg, dry_run=dry_run,
                alert=(lambda m: send_alert(cfg.alert_webhook, m))
                if cfg.alert_webhook else None,
-               heartbeat=(lambda d: send_heartbeat(cfg.heartbeat_url, detail=d))
+               heartbeat=(lambda d, failed=False: send_heartbeat(
+                   cfg.heartbeat_url, detail=d, failed=failed))
                if cfg.heartbeat_url else None)
     if not cfg.heartbeat_url:
         click.echo("  ※ ORC_HEARTBEAT_URL が未設定です。"

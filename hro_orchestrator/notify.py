@@ -37,11 +37,19 @@ def _post(url: str, body: bytes | None, content_type: str | None) -> bool:
         return False
 
 
-def heartbeat(url: str, *, detail: str = "") -> bool:
-    """生存 ping。★途切れたことを外部に気づかせるのが目的。"""
+def heartbeat(url: str, *, detail: str = "", failed: bool = False) -> bool:
+    """生存 ping。★途切れたことを外部に気づかせるのが目的。
+
+    Args:
+        failed: 論理的な異常があったなら True。healthchecks 系は `<url>/fail` で
+            **即座に異常**として扱う。これが無いと、死活監視は「動いていない」
+            しか拾えず、「動いているが agent が上がらない」を取り逃す
+            (別の通知先を用意しない限り、誰も気づかない)。
+    """
     if not url:
         return False
-    return _post(url, detail.encode("utf-8")[:2000] if detail else None,
+    target = url.rstrip("/") + "/fail" if failed else url
+    return _post(target, detail.encode("utf-8")[:2000] if detail else None,
                  "text/plain; charset=utf-8" if detail else None)
 
 

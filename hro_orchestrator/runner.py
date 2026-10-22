@@ -105,7 +105,9 @@ def tick(conn, az: AzureVms, cfg: Config, *, dry_run: bool = False,
     #   dry-run でも送る。「timer が回っているか」の確認にもなる。
     if heartbeat is not None:
         try:
-            heartbeat(_summary(st, out))
+            # ★異常があるなら、その旨で ping する。死活監視が「動いていない」
+            #   しか拾えないと、「動いているが agent が上がらない」を取り逃す。
+            heartbeat(_summary(st, out), failed=bool(out.alerts))
         except Exception as e:      # noqa: BLE001 - 通知で1周を壊さない
             log.warning("heartbeat に失敗: %s", e)
     return out
