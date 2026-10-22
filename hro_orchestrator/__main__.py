@@ -157,12 +157,12 @@ def coldstart_cmd(timeout_min, skip_stop, force) -> None:
     res = cold_run(vm=pol.windows_vm, target=pol.windows_target,
                    stop_vm=az.stop, start_vm=az.start,
                    wait_stopped=lambda v: az.wait_for_power(v, "VM deallocated"),
-                   agent_alive=lambda t: dbmod.live_agents(conn).get(t, False),
+                   agent_seen_at=lambda t: dbmod.agent_last_seen(conn).get(t),
+                   ref_now=lambda: dbmod.db_now(conn),
                    timeout_sec=timeout_min * 60.0, skip_stop=skip_stop,
                    log=click.echo)
     click.echo("")
-    for line in res.lines():
-        click.echo(line)
+    click.echo(res.verdict())
     raise SystemExit(0 if res.ok else 1)
 
 

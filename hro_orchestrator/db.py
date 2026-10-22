@@ -133,6 +133,23 @@ def live_agents(conn, *, max_age_sec: int = 60) -> dict[str, bool]:
     return out
 
 
+def db_now(conn):
+    """DB 側の現在時刻。★last_seen と比べるので、こちらの時計を使わない。"""
+    return _rows(conn, "SELECT now()")[0][0]
+
+
+def agent_last_seen(conn) -> dict[str, object]:
+    """{target: 最後の心拍時刻}。生死ではなく**時刻**を返す。
+
+    ★「60秒以内なら生存」で冷間起動を判定すると、VM を落とした直後に
+      まだ60秒経っておらず、**死んだ agent を生きていると誤判定する**
+      (2026-10-23: coldstart-test が0秒で合格した)。
+      起動を投げた時刻より後の心拍か、で見ること。
+    """
+    return {str(server): seen
+            for server, seen in _rows(conn, "SELECT server, last_seen FROM ops_agent")}
+
+
 def enqueue_race_day(conn, date: str, flow_args_json: str, *,
                      requested_by: str = "hro-orchestrator") -> int:
     """race_day を投入する。args は UI から渡しているものと同じ形。"""
