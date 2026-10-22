@@ -10,6 +10,22 @@ from .azure_vm import AzureVms
 from .config import load_config
 
 
+def _guard_db(fn):
+    """DB 不達をトレースバックではなく1行で見せる。"""
+    import functools
+
+    @functools.wraps(fn)
+    def _wrap(*a, **k):
+        from .db import DbUnavailable
+        try:
+            return fn(*a, **k)
+        except DbUnavailable as e:
+            click.echo(f"✗ {e}")
+            raise SystemExit(2) from None
+
+    return _wrap
+
+
 def _setup(dry_run: bool):
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
@@ -24,13 +40,14 @@ def cli() -> None:
 
 
 @cli.command("status")
+@_guard_db
 def status_cmd() -> None:
     """VM / agent / ジョブの現状を出す(何も変えない)。"""
     from . import db as dbmod
     from .runner import collect
 
     cfg, az = _setup(dry_run=True)
-    conn = dbmod.connect(cfg)
+    conn = dbmod.connect_or_explain(cfg)
     st = collect(conn, az, cfg)
     click.echo(f"=== {st.date} ===")
     click.echo(f"  開催日      : {'はい' if st.is_race_day else 'いいえ'}")
@@ -51,6 +68,7 @@ def status_cmd() -> None:
 
 
 @cli.command("plan")
+@_guard_db
 def plan_cmd() -> None:
     """いま何をするつもりかだけ出す(副作用なし)。"""
     from . import db as dbmod
@@ -58,7 +76,7 @@ def plan_cmd() -> None:
     from .runner import collect
 
     cfg, az = _setup(dry_run=True)
-    conn = dbmod.connect(cfg)
+    conn = dbmod.connect_or_explain(cfg)
     acts = make_plan(collect(conn, az, cfg), cfg.policy)
     if not acts:
         click.echo("することはありません")
@@ -71,6 +89,7 @@ def plan_cmd() -> None:
 @click.option("--dry-run", is_flag=True, help="行動を出すが実行しない")
 @click.option("--check-azure/--no-check-azure", default=True,
               help="az が使えるかを先に確かめる")
+@_guard_db
 def run_cmd(dry_run, check_azure) -> None:
     """1周ぶん実行する。★冪等なので、timer から何度呼んでも安全。"""
     from . import db as dbmod
@@ -86,7 +105,7 @@ def run_cmd(dry_run, check_azure) -> None:
     from .notify import alert as send_alert
     from .notify import heartbeat as send_heartbeat
 
-    conn = dbmod.connect(cfg)
+    conn = dbmod.connect_or_explain(cfg)
     out = tick(conn, az, cfg, dry_run=dry_run,
                alert=(lambda m: send_alert(cfg.alert_webhook, m))
                if cfg.alert_webhook else None,
@@ -109,6 +128,7 @@ def run_cmd(dry_run, check_azure) -> None:
               help="既に停止しているので、止めずに起こすところから試す")
 @click.option("--force", is_flag=True,
               help="開催日でも実行する(★その日が終わります)")
+@_guard_db
 def coldstart_cmd(timeout_min, skip_stop, force) -> None:
     """★人が一切触らずに agent が上がるかを確かめる。
 
@@ -123,7 +143,7 @@ def coldstart_cmd(timeout_min, skip_stop, force) -> None:
     from .runner import collect
 
     cfg, az = _setup(dry_run=False)
-    conn = dbmod.connect(cfg)
+    conn = dbmod.connect_or_explain(cfg)
     st = collect(conn, az, cfg)
     pol = cfg.policy
     why = refuse_reason(is_race_day=st.is_race_day,

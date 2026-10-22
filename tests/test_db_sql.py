@@ -64,3 +64,52 @@ def test_every_column_we_select_exists_in_the_schema():
 def test_we_never_select_a_column_named_name():
     """今回の取り違えの再発防止。"""
     assert not re.search(r"SELECT\s+name\b", _SRC)
+
+
+# --------------------------------------------------------------------------- #
+# ★DB が落ちているときの出方
+# --------------------------------------------------------------------------- #
+def test_db_outage_is_explained_not_a_traceback(monkeypatch):
+    """★2026-10-22 に PostgreSQL が保守で再起動し、agent が
+         `FATAL: the database system is shutting down` を吐いた。
+       司令塔は DB が無いと開催日かどうかすら分からない。
+       トレースバックだけでは、保守なのか設定ミスなのか読み取れない。
+    """
+    from hro_orchestrator import db as dbmod
+    from hro_orchestrator.config import Config
+
+    monkeypatch.setattr(dbmod, "connect", lambda cfg: (_ for _ in ()).throw(
+        RuntimeError("connection failed: FATAL:  the database system is shutting down")))
+    try:
+        dbmod.connect_or_explain(Config())
+    except dbmod.DbUnavailable as e:
+        msg = str(e)
+    else:
+        raise AssertionError("例外にならない")
+    assert "DB に繋がりません" in msg
+    assert "保守による再起動" in msg, "原因の見当を出していない"
+    assert "死活監視" in msg, "外部監視が鳴ることを伝えていない"
+
+
+def test_a_stopped_server_gets_a_different_hint(monkeypatch):
+    from hro_orchestrator import db as dbmod
+    from hro_orchestrator.config import Config
+
+    monkeypatch.setattr(dbmod, "connect", lambda cfg: (_ for _ in ()).throw(
+        OSError("timeout expired")))
+    try:
+        dbmod.connect_or_explain(Config())
+    except dbmod.DbUnavailable as e:
+        assert "停止されている" in str(e)
+    else:
+        raise AssertionError("例外にならない")
+
+
+def test_every_command_guards_the_db():
+    """★どのコマンドでもトレースバックを出さない。"""
+    src = (Path(__file__).resolve().parents[1]
+           / "hro_orchestrator" / "__main__.py").read_text(encoding="utf-8")
+    for name in ("status_cmd", "plan_cmd", "run_cmd", "coldstart_cmd"):
+        i = src.index(f"def {name}(")
+        assert "@_guard_db" in src[max(0, i - 400):i], name
+    assert "dbmod.connect(cfg)" not in src, "素の connect を呼んでいる"

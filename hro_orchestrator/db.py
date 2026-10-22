@@ -42,6 +42,10 @@ SELECT server, EXTRACT(EPOCH FROM (now() - last_seen))::int AS age
 """
 
 
+class DbUnavailable(RuntimeError):
+    """DB に繋がらない。★司令塔は何も判断できないので、黙って続けない。"""
+
+
 def connect(cfg: Config):
     pg = cfg.postgres
     try:
@@ -62,6 +66,28 @@ def connect(cfg: Config):
     c = pg8000.dbapi.connect(**kw)
     c.autocommit = True
     return c
+
+
+def connect_or_explain(cfg: Config):
+    """繋がらなければ、何が起きているかを言ってから落ちる。
+
+    ★DB は全部の土台。落ちていると司令塔は開催日かどうかすら分からない。
+      トレースバックだけ吐いて終わると、保守による再起動なのか設定ミスなのかが
+      読み取れない(2026-10-22 に実際に落ちた)。
+    """
+    try:
+        return connect(cfg)
+    except Exception as e:      # noqa: BLE001
+        msg = str(e)
+        hint = ("保守による再起動中かもしれません(数分で戻ります)"
+                if "shutting down" in msg or "starting up" in msg else
+                "停止されている可能性があります: "
+                "az postgres flexible-server show -g <rg> -n <name> --query state")
+        raise DbUnavailable(
+            f"DB に繋がりません({cfg.postgres.host}): {msg[:200]}\n"
+            f"  {hint}\n"
+            "  ★この間、司令塔は何も判断できません。"
+            "死活監視の ping も送らないので、外部の監視が鳴ります") from e
 
 
 def _rows(conn, sql: str, params=()) -> list[tuple]:
