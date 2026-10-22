@@ -5,12 +5,27 @@
 
 ## 1. Azure の権限(マネージドID、最小権限)
 
-```bash
-# Linux VM にシステム割り当てマネージドID を付ける
-az vm identity assign -g prod1 -n hro-calc-prod1
+★**この作業は VM 上ではできない。** ID を付ける操作そのものに認証が要るので、
+  **手元の PC か Azure Cloud Shell**(`az login` 済み)から行う。
+★カスタムロールの作成には **所有者** か **ユーザー アクセス管理者** の権限が要る。
+  持っていない場合は末尾の「権限が足りないとき」を読むこと。
 
-# 起動/停止だけのカスタムロールを作る(Contributor を付けない)
-cat > vmpower.json <<'JSON'
+### 1-1. マネージドID を付ける
+
+```bash
+az login
+az account set --subscription <SUB_ID>
+az vm identity assign -g prod1 -n hro-calc-prod1       # 司令塔が動く機
+```
+
+### 1-2. 起動/停止だけのカスタムロールを作る
+
+Contributor は付けない(VM を消す権限まで渡ることになる)。
+
+```bash
+SUB=$(az account show --query id -o tsv)
+
+cat > vmpower.json <<JSON
 {
   "Name": "HRO VM Power",
   "Description": "対象VMの起動/停止/状態参照のみ",
@@ -20,16 +35,87 @@ cat > vmpower.json <<'JSON'
     "Microsoft.Compute/virtualMachines/start/action",
     "Microsoft.Compute/virtualMachines/deallocate/action"
   ],
-  "AssignableScopes": ["/subscriptions/<SUB_ID>/resourceGroups/prod1"]
+  "NotActions": [],
+  "AssignableScopes": ["/subscriptions/$SUB"]
 }
 JSON
-az role definition create --role-definition vmpower.json
 
-# ★割り当て先は**対象 VM だけ**。資源グループ全体にしない
-PRINCIPAL=$(az vm show -g prod1 -n hro-calc-prod1 --query identity.principalId -o tsv)
-SCOPE=$(az vm show -g prod1 -n hro-sync-prod2 --query id -o tsv)
-az role assignment create --assignee "$PRINCIPAL" --role "HRO VM Power" --scope "$SCOPE"
+az role definition create --role-definition vmpower.json
 ```
+
+PowerShell なら(ヒアドキュメントが使えないので):
+
+```powershell
+$SUB = az account show --query id -o tsv
+@"
+{
+  "Name": "HRO VM Power",
+  "Description": "対象VMの起動/停止/状態参照のみ",
+  "Actions": [
+    "Microsoft.Compute/virtualMachines/read",
+    "Microsoft.Compute/virtualMachines/instanceView/read",
+    "Microsoft.Compute/virtualMachines/start/action",
+    "Microsoft.Compute/virtualMachines/deallocate/action"
+  ],
+  "NotActions": [],
+  "AssignableScopes": ["/subscriptions/$SUB"]
+}
+"@ | Set-Content -Encoding utf8 vmpower.json
+
+az role definition create --role-definition vmpower.json
+```
+
+★`AssignableScopes` は「このロールを**割り当てられる範囲**」であって、
+  実際に効く範囲ではない。実際の範囲は次の割り当てで決まる。
+★作成直後は反映に1分ほどかかる。`az role definition list --name "HRO VM Power"`
+  で見えるようになってから次へ。
+
+### 1-3. 対象 VM **だけ**に割り当てる
+
+```bash
+PRINCIPAL=$(az vm show -g prod1 -n hro-calc-prod1 --query identity.principalId -o tsv)
+SCOPE=$(az vm show -g prod1 -n hro-sync-prod2 --query id -o tsv)   # 止めたい機
+
+az role assignment create --assignee-object-id "$PRINCIPAL" \
+  --assignee-principal-type ServicePrincipal \
+  --role "HRO VM Power" --scope "$SCOPE"
+```
+
+★`--assignee` ではなく `--assignee-object-id` + `--assignee-principal-type` を
+  使う。マネージドID は Graph から引けないことがあり、`--assignee` だと
+  「Principal not found」になる。
+★スコープは**対象 VM の id**。資源グループ全体にしない。
+
+### 1-4. 確かめる
+
+```bash
+az role assignment list --assignee "$PRINCIPAL" --scope "$SCOPE" -o table
+```
+
+そのうえで Linux 機に戻り:
+
+```bash
+az login --identity
+az account show
+az vm get-instance-view -g prod1 -n hro-sync-prod2 \
+  --query "instanceView.statuses[?starts_with(code,'PowerState/')].displayStatus" -o tsv
+```
+
+最後のコマンドで `VM running` / `VM deallocated` が返れば、権限まで通っている。
+
+### 権限が足りないとき
+
+カスタムロールを作れない(所有者でない)なら、組み込みロールで代用できる。
+
+```bash
+az role assignment create --assignee-object-id "$PRINCIPAL" \
+  --assignee-principal-type ServicePrincipal \
+  --role "Virtual Machine Contributor" --scope "$SCOPE"
+```
+
+★こちらは**その VM の削除や変更もできてしまう**。スコープが1台に限られて
+  いるとはいえ、カスタムロールより緩い。使うなら、後でカスタムロールに
+  差し替えること。
 
 ## 2. 設置
 
