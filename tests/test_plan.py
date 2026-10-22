@@ -201,3 +201,41 @@ def test_planning_is_idempotent():
     """★何度走らせても同じ答え。状態を持たない。"""
     st = _state(_at(8), running=True, agent=True)
     assert plan(st, POL) == plan(st, POL)
+
+
+# --------------------------------------------------------------------------- #
+# ★非開催日でも、仕事があるなら起こす
+# --------------------------------------------------------------------------- #
+def test_starts_the_vm_for_a_queued_job_on_a_non_race_day():
+    """★止めるだけでは片手落ち。
+
+    VM が止まっている間に admin から Windows 宛のジョブ(sync_all / settle /
+    close_day 等)を投入すると、拾う agent が居らず**永久に queued のまま**になる。
+    「誰も気づかないまま何も起きない」は、この系で一番高くつく壊れ方。
+    """
+    acts = plan(_state(_at(12), race_day=False, running=False,
+                       busy={"windows": 1}), POL)
+    assert kinds(acts) == [START_VM]
+    assert "待っています" in acts[0].reason
+
+
+def test_an_idle_stopped_vm_stays_stopped():
+    acts = plan(_state(_at(12), race_day=False, running=False), POL)
+    assert acts == []
+
+
+def test_jobs_for_another_machine_do_not_wake_windows():
+    """★vm 宛のジョブで Windows を起こさない(課金が無駄になる)。"""
+    acts = plan(_state(_at(12), race_day=False, running=False,
+                       busy={"vm": 3}), POL)
+    assert acts == []
+
+
+def test_waking_and_stopping_never_happen_together():
+    """★同じ周回で起こして止めると、永久に往復する。"""
+    for busy in ({}, {"windows": 1}, {"vm": 2}):
+        for running in (True, False):
+            acts = plan(_state(_at(12), race_day=False, running=running,
+                               busy=busy), POL)
+            ks = kinds(acts)
+            assert not (START_VM in ks and STOP_VM in ks), (busy, running)

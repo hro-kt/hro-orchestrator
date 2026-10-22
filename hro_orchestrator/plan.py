@@ -136,16 +136,25 @@ def plan(st: DayState, pol: Policy = Policy()) -> list[Action]:
 
 
 def _plan_idle(st: DayState, pol: Policy, win: VmState | None) -> list[Action]:
-    """非開催日。止まっているべき。"""
-    if win is None or not win.running:
-        return []
+    """非開催日。基本は止まっているべきだが、仕事があるなら起こす。"""
     busy = st.busy.get(pol.windows_target, 0)
+    if win is None:
+        return []
+    if not win.running:
+        # ★止めるだけでは片手落ち。VM が止まっている間に admin から
+        #   Windows 宛のジョブ(sync_all / settle / close_day 等)を投入すると、
+        #   拾う agent が居らず**永久に queued のまま**になる。
+        #   「誰も気づかないまま何も起きない」は、この系で一番高くつく壊れ方。
+        if busy:
+            return [Action(START_VM, pol.windows_vm,
+                           f"{pol.windows_target} 宛のジョブが {busy} 件待っています")]
+        return []
     if busy:
         # ★走っているものがあるなら止めない。開催日でなくても、
         #   後日の決済や同期が回っていることがある。
         return [Action(WAIT, pol.windows_vm,
-                       f"非開催日ですが {busy} 件のジョブが走っています。止めません")]
-    return [Action(STOP_VM, pol.windows_vm, "非開催日で、走っているジョブもありません")]
+                       f"非開催日ですが {busy} 件のジョブが待機/実行中です。止めません")]
+    return [Action(STOP_VM, pol.windows_vm, "非開催日で、待っているジョブもありません")]
 
 
 def _plan_stop(st: DayState, pol: Policy, win: VmState | None) -> list[Action]:
