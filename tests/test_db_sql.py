@@ -113,3 +113,42 @@ def test_every_command_guards_the_db():
         i = src.index(f"def {name}(")
         assert "@_guard_db" in src[max(0, i - 400):i], name
     assert "dbmod.connect(cfg)" not in src, "素の connect を呼んでいる"
+
+
+# --------------------------------------------------------------------------- #
+# 朝の支度(投入と打ち切り)
+# --------------------------------------------------------------------------- #
+def test_sync_all_is_enqueued_without_a_date():
+    """★date を渡すと SYNC_SMART が切れて「その日以降だけ」になり、
+       取りこぼしが埋まらない(hro_operations.agent._b_sync_all)。
+    """
+    i = _SRC.index("def enqueue_job(")
+    body = _SRC[i:_SRC.index("def cancel_job(")]
+    assert "args or {}" in body
+    assert "SYNC_SMART" in body, "なぜ date を渡さないのかが書いていない"
+
+
+def test_cancel_sets_a_flag_instead_of_killing():
+    """★JV-Link を掴んだまま殺すと、次に開けなくなる。agent に降ろさせる。"""
+    i = _SRC.index("def cancel_job(")
+    body = _SRC[i:i + 900]
+    assert "cancel_requested = true" in body
+    assert "status IN ('queued','running')" in body
+    assert "NOT cancel_requested" in body, "二度立てて id を重複して返す"
+
+
+def test_morning_policy_is_configurable_and_can_be_switched_off():
+    """★本番で効きすぎたときに、コードを触らず止められること。"""
+    import os
+
+    from hro_orchestrator.config import load_config
+
+    old = dict(os.environ)
+    try:
+        os.environ["ORC_MORNING_JOBS"] = ""
+        assert load_config().policy.morning_jobs == ()
+        os.environ["ORC_MORNING_JOBS"] = "sync_all,fetch_ts_odds"
+        assert load_config().policy.morning_jobs == ("sync_all", "fetch_ts_odds")
+    finally:
+        os.environ.clear()
+        os.environ.update(old)

@@ -12,8 +12,8 @@ from datetime import datetime, timedelta
 from . import db as dbmod
 from .azure_vm import AzureVms
 from .config import Config
-from .plan import (ALERT, ENQUEUE, JST, START_VM, STOP_VM, WAIT,
-                   Action, DayState, VmState, plan)
+from .plan import (ALERT, CANCEL_JOB, ENQUEUE, ENQUEUE_JOB, JST, START_VM,
+                   STOP_VM, WAIT, Action, DayState, VmState, plan)
 
 log = logging.getLogger(__name__)
 
@@ -87,6 +87,16 @@ def execute(conn, az: AzureVms, cfg: Config, actions: list[Action], *,
                                          cfg.flow_args_json)
             log.warning("race_day job#%s を投入しました(%s)", jid, a.reason)
             done.append(f"enqueue race_day job#{jid}")
+        elif a.kind == ENQUEUE_JOB:
+            # ★朝の支度は Windows の仕事(JV-Link が在る機)。
+            jid = dbmod.enqueue_job(conn, a.target, target=cfg.policy.windows_target)
+            log.warning("%s job#%s を投入しました(%s)", a.target, jid, a.reason)
+            done.append(f"enqueue {a.target} job#{jid}")
+        elif a.kind == CANCEL_JOB:
+            ids = dbmod.cancel_job(conn, a.target)
+            log.warning("%s job#%s に中止を要求しました(%s)",
+                        a.target, ",".join(map(str, ids)) or "-", a.reason)
+            done.append(f"cancel {a.target} job#{','.join(map(str, ids)) or '-'}")
         else:
             log.error("未知の行動: %s", a)
             alerts.append(f"未知の行動: {a}")

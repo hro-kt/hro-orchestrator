@@ -171,6 +171,51 @@ poetry run hro-orchestrator coldstart-test
 を通して `○ 人が触らずに agent が上がりました` を見るまで、timer を
 有効にしないこと。
 
+## 3.7 朝の支度(sync-all を人が流さなくていいようにする)
+
+開催日は、第1発走の **6 時間前**に VM を起こし、agent が応答したら `sync_all` を
+投入して、終わるまで `race_day` を入れずに待つ。
+
+**なぜ待つのか。** JV-Link は1台1プロセル。`sync_all` が走ったまま `race_day` が
+始まると、`race_day` は `run_odds` を**見送って先へ進む**
+(`hro_operations/orchestrator.py` の `_run_step` / `_jvlink_busy`)。
+見送られると速報オッズが一日来ないので、**1件も買えない**。黙って0件になる壊れ方で、
+一番高くつく。
+
+締切は2段:
+
+| 既定 | 時刻(第1発走10:00なら) | 何をするか |
+|---|---|---|
+| `morning_lead_hours=6.0` | 04:00 | VM を起こす |
+| `morning_cutoff_hours=3.0` | 07:00 | これ以降は**新しく始めない**(始めても終わらない) |
+| `morning_last_call_hours=2.5` | 07:30 | これ以降も走っていたら**打ち切る** |
+| `enqueue_lead_hours=2.0` | 08:00 | `race_day` を投入 |
+
+打ち切りは乱暴に見えるが、残すほうが高くつく。同期は `SYNC_SMART` が DB の
+frontier から続きを取り直すので、打ち切っても失わない。発注は失うと戻らない。
+
+**`morning_lead_hours=6.0` は暫定値。** 実測で決め直すこと:
+
+```sql
+SET TIME ZONE 'Asia/Tokyo';
+SELECT id, requested_at,
+       finished_at - started_at AS duration, status
+  FROM ops_job
+ WHERE kind = 'sync_all' AND started_at IS NOT NULL
+ ORDER BY id DESC LIMIT 20;
+```
+
+所要の最大値 + 1時間を `ORC_MORNING_LEAD_HOURS` に入れる。
+
+```bash
+# 効きすぎたら、コードを触らずに止められる
+echo 'ORC_MORNING_JOBS=' >> .env          # 空 = 朝の支度をしない(従来の挙動)
+echo 'ORC_MORNING_LEAD_HOURS=8' >> .env   # もっと早く起こす
+```
+
+★順序(`lead ≥ cutoff ≥ last_call ≥ enqueue`)が崩れた設定は起動時に例外で落ちる。
+「起こす前に締切」「打ち切る前に投入」を走らせない。
+
 ## 4. ★死活監視(これが一番大事)
 
 **司令塔自身が落ちたことは、司令塔には報告できない。**

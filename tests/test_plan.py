@@ -10,10 +10,12 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from hro_orchestrator.plan import (  # noqa: E402
-    ALERT, ENQUEUE, JST, START_VM, STOP_VM, WAIT,
+    ALERT, CANCEL_JOB, ENQUEUE, ENQUEUE_JOB, JST, START_VM, STOP_VM, WAIT,
     DayState, Policy, VmState, plan,
 )
 
@@ -45,15 +47,22 @@ def kinds(acts):
 # --------------------------------------------------------------------------- #
 def test_starts_the_vm_with_enough_lead():
     """★人が手で起こせる余裕を残す。起動に失敗した日は気づくのが遅いと丸ごと失う。"""
-    acts = plan(_state(_at(7)), POL)          # 第1発走10:00 の3時間前
+    acts = plan(_state(_at(7)), POL)          # 第1発走10:00 の6時間前を過ぎている
     assert kinds(acts) == [START_VM]
     assert acts[0].target == WIN
 
 
 def test_does_nothing_too_early():
-    acts = plan(_state(_at(5)), POL)
+    acts = plan(_state(_at(3)), POL)
     assert kinds(acts) == [WAIT]
-    assert "07:00" in acts[0].reason
+    assert "04:00" in acts[0].reason          # 朝の支度があるので 6 時間前
+
+
+def test_the_morning_work_moves_the_wake_up_earlier():
+    """★sync-all は時間がかかる。第1発走の3時間前に起こしても間に合わない。"""
+    early = Policy(morning_jobs=())
+    assert kinds(plan(_state(_at(5)), early)) == [WAIT]        # 07:00 まで待つ
+    assert kinds(plan(_state(_at(5)), POL)) == [START_VM]      # 04:00 を過ぎている
 
 
 def test_does_not_start_twice():
@@ -66,7 +75,7 @@ def test_does_not_start_twice():
 # --------------------------------------------------------------------------- #
 def test_waits_for_the_agent_before_enqueueing():
     """ここを飛ばすと、誰も拾わないジョブを投入して『正常に見えるが0件』になる。"""
-    acts = plan(_state(_at(7, 5), running=True, agent=False), POL)
+    acts = plan(_state(_at(4, 5), running=True, agent=False), POL)
     assert kinds(acts) == [WAIT]
     assert ENQUEUE not in kinds(acts)
 
@@ -229,6 +238,111 @@ def test_jobs_for_another_machine_do_not_wake_windows():
     acts = plan(_state(_at(12), race_day=False, running=False,
                        busy={"vm": 3}), POL)
     assert acts == []
+
+
+# --------------------------------------------------------------------------- #
+# 朝の支度(重い同期を発走前に済ませる)
+# --------------------------------------------------------------------------- #
+def _live(now, **kw):
+    return _state(now, running=True, agent=True, **kw)
+
+
+def test_enqueues_the_morning_sync_once_the_agent_is_up():
+    """★人が手で sync-all を流すのをやめたい。時間がかかるので早い時刻に。"""
+    acts = plan(_live(_at(5)), POL)
+    assert kinds(acts) == [ENQUEUE_JOB]
+    assert acts[0].target == "sync_all"
+
+
+def test_the_morning_sync_is_not_started_again_while_it_runs():
+    for status in ("queued", "running"):
+        acts = plan(_live(_at(5), jobs={"sync_all": status}), POL)
+        assert ENQUEUE_JOB not in kinds(acts), status
+
+
+def test_race_day_waits_until_jvlink_is_free():
+    """★ここが肝。JV-Link は1台1プロセスで、sync_all が走ったまま race_day が
+       始まると run_odds が**見送られ**(orchestrator._run_step)、
+       速報オッズが一日来ない = 1件も買えない。
+    """
+    acts = plan(_live(_at(7, 20), jobs={"sync_all": "running"}), POL)
+    assert ENQUEUE not in kinds(acts)
+    assert WAIT in kinds(acts)
+
+
+def test_any_jvlink_job_blocks_race_day_not_just_our_own():
+    """★人が reparse を流したまま忘れていても同じ事故になる。"""
+    acts = plan(_live(_at(7, 20), jobs={"reparse": "running"}), POL)
+    assert ENQUEUE not in kinds(acts)
+    assert WAIT in kinds(acts)
+
+
+def test_the_morning_sync_is_cut_off_when_the_first_race_gets_close():
+    """★残すほうが高くつく。同期は SYNC_SMART が続きから取り直す。"""
+    acts = plan(_live(_at(7, 40), jobs={"sync_all": "running"}), POL)  # 発走10:00 の2:20前
+    assert CANCEL_JOB in kinds(acts)
+    assert [a for a in acts if a.kind == CANCEL_JOB][0].target == "sync_all"
+    assert ALERT in kinds(acts)
+
+
+def test_it_does_not_cut_off_before_the_last_call():
+    acts = plan(_live(_at(7, 20), jobs={"sync_all": "running"}), POL)  # 2:40前
+    assert CANCEL_JOB not in kinds(acts)
+
+
+def test_race_day_is_not_enqueued_on_the_same_tick_as_the_cut_off():
+    """★中止は非同期(cancel_requested を立てて agent に降ろさせる)。
+       立てた周回で race_day も入れると、結局 JV-Link が重なる。"""
+    acts = plan(_live(_at(8, 10), jobs={"sync_all": "running"}), POL)
+    assert kinds(acts) == [CANCEL_JOB, ALERT]
+    assert ENQUEUE not in kinds(acts)
+
+
+def test_too_late_to_start_the_morning_sync_means_skip_it_not_delay_betting():
+    """★始めると第1発走に間に合わない。発注を優先し、鳴らすだけ。"""
+    acts = plan(_live(_at(8)), POL)                  # cutoff 07:00 を過ぎている
+    assert ENQUEUE_JOB not in kinds(acts)
+    assert ENQUEUE in kinds(acts)                    # 発注は止めない
+    assert "今日は流しません" in [a.reason for a in acts if a.kind == ALERT][0]
+
+
+def test_a_failed_morning_sync_does_not_stop_betting():
+    acts = plan(_live(_at(8), jobs={"sync_all": "failed"}), POL)
+    assert ENQUEUE in kinds(acts)
+    assert ALERT in kinds(acts)
+
+
+def test_a_finished_morning_sync_is_quiet():
+    acts = plan(_live(_at(8), jobs={"sync_all": "done"}), POL)
+    assert kinds(acts) == [ENQUEUE]
+
+
+def test_the_morning_work_stops_once_race_day_exists():
+    """★race_day を入れた後は race_day 自身が JV-Link の段取りを持つ
+       (常駐を止めてから sync_all → close_day)。二重に面倒を見ない。"""
+    acts = plan(_live(_at(9), jobs={"race_day": "running", "sync_all": "running"}), POL)
+    assert ENQUEUE_JOB not in kinds(acts) and CANCEL_JOB not in kinds(acts)
+
+
+def test_morning_jobs_run_one_at_a_time():
+    """★JV-Link は1台1プロセス。2本投げると COM が壊れる。"""
+    pol = Policy(morning_jobs=("sync_all", "fetch_ts_odds"))
+    acts = plan(_live(_at(5)), pol)
+    assert [a.target for a in acts if a.kind == ENQUEUE_JOB] == ["sync_all"]
+    acts = plan(_live(_at(5), jobs={"sync_all": "done"}), pol)
+    assert [a.target for a in acts if a.kind == ENQUEUE_JOB] == ["fetch_ts_odds"]
+
+
+def test_an_out_of_order_policy_is_refused():
+    """★「起こす > 始めない > 打ち切る > 投入」の順を崩すと、
+       起こす前に締切が来たり、打ち切る前に投入したりする。"""
+    with pytest.raises(ValueError, match="以上である必要があります"):
+        Policy(morning_lead_hours=1.0)
+
+
+def test_disabling_the_morning_work_restores_the_old_behaviour():
+    pol = Policy(morning_jobs=())
+    assert kinds(plan(_live(_at(8)), pol)) == [ENQUEUE]
 
 
 # --------------------------------------------------------------------------- #

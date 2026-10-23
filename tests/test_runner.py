@@ -13,8 +13,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from hro_orchestrator import runner as R  # noqa: E402
 from hro_orchestrator.azure_vm import AzureVms  # noqa: E402
 from hro_orchestrator.config import Config  # noqa: E402
-from hro_orchestrator.plan import (ALERT, ENQUEUE, JST, START_VM, STOP_VM,  # noqa: E402
-                                   WAIT, Action)
+from hro_orchestrator.plan import (ALERT, CANCEL_JOB, ENQUEUE, ENQUEUE_JOB,  # noqa: E402
+                                   JST, START_VM, STOP_VM, WAIT, Action)
 
 
 class _Az(AzureVms):
@@ -59,6 +59,43 @@ def test_dry_run_touches_nothing(monkeypatch):
                      Action(ENQUEUE, "race_day", "r")], dry_run=True)
     assert az.started == [] and az.stopped == []
     assert len(out.done) == 3 and all(d.startswith("(dry-run)") for d in out.done)
+
+
+def test_dry_run_does_not_enqueue_or_cancel_the_morning_work(monkeypatch):
+    """★打ち切りは実害のある操作。dry-run で走ったら試運転にならない。"""
+    for name in ("enqueue_job", "cancel_job"):
+        monkeypatch.setattr(R.dbmod, name,
+                            lambda *a, **k: pytest.fail(f"dry-run で {name} を呼んだ"))
+    out = R.execute(object(), _Az(), _cfg(),
+                    [Action(ENQUEUE_JOB, "sync_all", "r"),
+                     Action(CANCEL_JOB, "sync_all", "r")], dry_run=True)
+    assert len(out.done) == 2
+
+
+# --------------------------------------------------------------------------- #
+# 朝の支度(★実際に db を呼ぶところまで見る)
+# --------------------------------------------------------------------------- #
+def test_enqueue_job_goes_to_the_windows_machine(monkeypatch):
+    """★JV-Link が在るのは Windows。vm に投げても誰も拾わない。"""
+    seen = {}
+    monkeypatch.setattr(R.dbmod, "enqueue_job",
+                        lambda conn, kind, **k: seen.update(kind=kind, **k) or 77)
+    out = R.execute(object(), _Az(), _cfg(), [Action(ENQUEUE_JOB, "sync_all", "朝")])
+    assert seen == {"kind": "sync_all", "target": "windows"}
+    assert "job#77" in out.done[0]
+
+
+def test_cancel_job_reports_which_jobs_it_stopped(monkeypatch):
+    monkeypatch.setattr(R.dbmod, "cancel_job", lambda conn, kind: [12, 13])
+    out = R.execute(object(), _Az(), _cfg(), [Action(CANCEL_JOB, "sync_all", "打ち切り")])
+    assert "cancel sync_all job#12,13" in out.done[0]
+
+
+def test_cancel_job_with_nothing_to_stop_is_not_an_error(monkeypatch):
+    """★先に終わっていることもある。それは異常ではない。"""
+    monkeypatch.setattr(R.dbmod, "cancel_job", lambda conn, kind: [])
+    out = R.execute(object(), _Az(), _cfg(), [Action(CANCEL_JOB, "sync_all", "r")])
+    assert out.alerts == []
 
 
 def test_azure_dry_run_does_not_spawn_a_process():

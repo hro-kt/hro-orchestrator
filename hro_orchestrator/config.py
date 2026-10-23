@@ -39,6 +39,14 @@ def _f(key: str, default: float) -> float:
     return float(v) if v else default
 
 
+def _kinds(key: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    """カンマ区切り。★空文字("")は「無効にする」。未設定とは意味が違う。"""
+    v = os.environ.get(key)
+    if v is None:
+        return default
+    return tuple(x.strip() for x in v.split(",") if x.strip())
+
+
 def load_config() -> Config:
     load_dotenv()
     e = os.environ.get
@@ -57,6 +65,11 @@ def load_config() -> Config:
         agent_wait_minutes=_f("ORC_AGENT_WAIT_MIN", 20.0),
         stop_after_minutes=_f("ORC_STOP_AFTER_MIN", 30.0),
         enqueue_lead_hours=_f("ORC_ENQUEUE_LEAD_HOURS", 2.0),
+        # 朝の支度。ORC_MORNING_JOBS="" で無効(これまでの挙動に戻る)
+        morning_jobs=_kinds("ORC_MORNING_JOBS", ("sync_all",)),
+        morning_lead_hours=_f("ORC_MORNING_LEAD_HOURS", 6.0),
+        morning_cutoff_hours=_f("ORC_MORNING_CUTOFF_HOURS", 3.0),
+        morning_last_call_hours=_f("ORC_MORNING_LAST_CALL_HOURS", 2.5),
     )
     return Config(postgres=pg, policy=pol,
                   resource_group=e("ORC_RESOURCE_GROUP", "prod1"),

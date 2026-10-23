@@ -18,6 +18,8 @@ JST = timezone(timedelta(hours=9))
 START_VM = "start_vm"
 STOP_VM = "stop_vm"
 ENQUEUE = "enqueue_race_day"
+ENQUEUE_JOB = "enqueue_job"     # target = ジョブ種別(朝の支度)
+CANCEL_JOB = "cancel_job"       # target = ジョブ種別
 ALERT = "alert"
 WAIT = "wait"
 
@@ -81,6 +83,34 @@ class Policy:
     # 翌日が土日なのに nl_ra に1レースも無ければ鳴らす(RACE データが古い)
     warn_stale_race_data: bool = True
 
+    # --- 朝の支度 ---------------------------------------------------------
+    # ★発走前に流しておく重い仕事。この順に**1本ずつ**(JV-Link は1台1プロセス)。
+    #   空にすると朝の支度をしない(これまでの挙動)。
+    morning_jobs: tuple[str, ...] = ("sync_all",)
+    # 朝の支度がある日は、これだけ前に VM を起こす。sync-all は時間がかかる。
+    morning_lead_hours: float = 6.0
+    # これを過ぎたら**新しくは始めない**。始めると終わらない。
+    morning_cutoff_hours: float = 3.0
+    # これを過ぎてもまだ走っていたら**打ち切る**。発注を優先する。
+    morning_last_call_hours: float = 2.5
+    # JV-Link を占有する種別。これが走っている間は race_day を入れない。
+    jvlink_kinds: tuple[str, ...] = ("sync_all", "fetch_ts_odds", "reparse")
+
+    def __post_init__(self) -> None:
+        # ★順序が狂うと「起こす前に締切」「打ち切る前に投入」になる。
+        #   設定の矛盾は、走り出す前にここで落とす。
+        if not self.morning_jobs:
+            return
+        order = [("morning_lead_hours", self.morning_lead_hours),
+                 ("morning_cutoff_hours", self.morning_cutoff_hours),
+                 ("morning_last_call_hours", self.morning_last_call_hours),
+                 ("enqueue_lead_hours", self.enqueue_lead_hours)]
+        for (an, av), (bn, bv) in zip(order, order[1:]):
+            if av < bv:
+                raise ValueError(
+                    f"{an}({av}) は {bn}({bv}) 以上である必要があります。"
+                    "起こす > 始めない > 打ち切る > race_day 投入 の順で早い")
+
 
 _LIVE = ("queued", "running")
 _FINISH_KINDS = ("close_day", "tax_seal")
@@ -104,7 +134,11 @@ def plan(st: DayState, pol: Policy = Policy()) -> list[Action]:
                        "開催日なのに発走時刻が読めません(nl_ra の hasso_time)。"
                        "RACE の取り込みを確認してください")]
 
-    start_at = st.first_post - timedelta(hours=pol.start_lead_hours)
+    # ★朝の支度がある日は早く起こす。sync-all は時間がかかるので、
+    #   第1発走の3時間前に起こしても間に合わない。
+    lead = max(pol.start_lead_hours,
+               pol.morning_lead_hours if pol.morning_jobs else 0.0)
+    start_at = st.first_post - timedelta(hours=lead)
     enqueue_at = st.first_post - timedelta(hours=pol.enqueue_lead_hours)
 
     # ---- 起こす ------------------------------------------------------------
@@ -112,7 +146,7 @@ def plan(st: DayState, pol: Policy = Policy()) -> list[Action]:
         return [Action(WAIT, "", f"{start_at:%H:%M} に {pol.windows_vm} を起こします")]
     if win is not None and not win.running:
         return [Action(START_VM, pol.windows_vm,
-                       f"第1発走 {st.first_post:%H:%M} の {pol.start_lead_hours:.0f} 時間前")]
+                       f"第1発走 {st.first_post:%H:%M} の {lead:.0f} 時間前")]
 
     # ---- agent を待つ ------------------------------------------------------
     # ★「VM が起動した」≠「agent が動いている」。ここを飛ばすと、
@@ -125,8 +159,20 @@ def plan(st: DayState, pol: Policy = Policy()) -> list[Action]:
                            "手で確認してください(第1発走まで時間があります)")]
         return [Action(WAIT, pol.windows_target, "agent の応答を待っています")]
 
-    # ---- 投入する ----------------------------------------------------------
+    # ---- 朝の支度 ----------------------------------------------------------
+    # ★race_day を入れる前だけ。入れた後は race_day 自身が JV-Link の段取りを持つ
+    #   (常駐を止めてから sync_all → close_day)。二重に面倒を見ない。
     race_day = st.jobs.get("race_day")
+    if race_day is None:
+        m_acts, jv_busy = _plan_morning(st, pol)
+        acts += m_acts
+        if jv_busy:
+            # ★JV-Link を掴んだままの仕事がある間に race_day を入れてはいけない。
+            #   race_day は run_odds を**見送って**先へ進む(orchestrator._run_step)。
+            #   見送られると速報オッズが一日来ず、1件も買えない。
+            return acts
+
+    # ---- 投入する ----------------------------------------------------------
     if race_day in _LIVE:
         acts.append(Action(WAIT, "race_day", "当日のオーケストレータが動いています"))
     elif race_day == "failed":
@@ -145,6 +191,61 @@ def plan(st: DayState, pol: Policy = Policy()) -> list[Action]:
     # ---- 止める ------------------------------------------------------------
     acts += _plan_stop(st, pol, win)
     return acts
+
+
+def _plan_morning(st: DayState, pol: Policy) -> tuple[list[Action], bool]:
+    """発走前に流しておく重い仕事。戻り値は (行動, JV-Link が塞がっているか)。
+
+    ★1本ずつしか出さない。JV-Link は1台につき1プロセスで、重ねると COM が壊れる。
+    ★締切を2段で持つ:
+        morning_cutoff     これ以降は**新しくは始めない**(始めても終わらない)
+        morning_last_call  これ以降も走っていたら**打ち切る**
+      打ち切るのは乱暴に見えるが、残すほうが高くつく。sync_all が走ったまま
+      race_day が始まると run_odds が見送られ、**その日は1件も買えない**。
+      同期は SYNC_SMART が frontier から取り直すので、打ち切っても失わない。
+    """
+    assert st.first_post is not None
+    acts: list[Action] = []
+    busy = [k for k in pol.jvlink_kinds if st.jobs.get(k) in _LIVE]
+    if busy:
+        last_call = st.first_post - timedelta(hours=pol.morning_last_call_hours)
+        if st.now >= last_call:
+            acts.append(Action(CANCEL_JOB, busy[0],
+                               f"第1発走 {st.first_post:%H:%M} が近いのに {busy[0]} が"
+                               "走っています。このままだと run_odds が見送られて"
+                               "一日買えません。同期を打ち切って発注を優先します"))
+            acts.append(Action(ALERT, busy[0],
+                               f"{busy[0]} を打ち切りました。取り込みは次の機会に"
+                               "持ち越します(SYNC_SMART が続きから取ります)"))
+        else:
+            acts.append(Action(WAIT, busy[0],
+                               f"{busy[0]} が走っています。終わるまで race_day は"
+                               f"入れません(打ち切りは {last_call:%H:%M})"))
+        return acts, True
+
+    if not pol.morning_jobs:
+        return acts, False
+
+    cutoff = st.first_post - timedelta(hours=pol.morning_cutoff_hours)
+    for kind in pol.morning_jobs:
+        s = st.jobs.get(kind)
+        if s == "done":
+            continue
+        if s == "failed":
+            # ★鳴らすだけ。黙って入れ直さないし、発注は止めない。
+            acts.append(Action(ALERT, kind,
+                               f"朝の {kind} が failed です。取り込みは欠けますが、"
+                               "発注はこのまま進めます"))
+            continue
+        if st.now >= cutoff:
+            acts.append(Action(ALERT, kind,
+                               f"朝の {kind} を今日は流しません({cutoff:%H:%M} を"
+                               "過ぎました)。始めると第1発走に間に合いません"))
+            continue
+        acts.append(Action(ENQUEUE_JOB, kind,
+                           f"第1発走 {st.first_post:%H:%M} の前に流します"))
+        return acts, True        # ★1本ずつ。次の周回で次の1本
+    return acts, False
 
 
 def _stale_race_data(st: DayState, pol: Policy) -> list[Action]:

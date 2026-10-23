@@ -156,6 +156,44 @@ def agent_last_seen(conn) -> dict[str, object]:
             for server, seen in _rows(conn, "SELECT server, last_seen FROM ops_agent")}
 
 
+def enqueue_job(conn, kind: str, *, target: str, args: dict | None = None,
+                requested_by: str = "hro-orchestrator") -> int:
+    """朝の支度(sync_all 等)を投入する。
+
+    ★sync_all に date を渡さない。渡すと SYNC_SMART が切れて「その日以降だけ」に
+      なり、取りこぼしが埋まらない(hro_operations.agent._b_sync_all 参照)。
+      空で投げると種別ごとに DB の frontier から自動差分で取る。
+    """
+    import json as _json
+
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "INSERT INTO ops_job(kind,args,target,requested_by)"
+            " VALUES(%s, %s, %s, %s) RETURNING id",
+            (kind, _json.dumps(args or {}, ensure_ascii=False), target, requested_by))
+        return int(cur.fetchone()[0])
+    finally:
+        cur.close()
+
+
+def cancel_job(conn, kind: str) -> list[int]:
+    """その種別で生きているジョブに中止を要求する。止まった id を返す。
+
+    ★kill はしない。cancel_requested を立てて agent に降ろさせる。
+      JV-Link を掴んだまま殺すと、次に開けなくなる。
+    """
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "UPDATE ops_job SET cancel_requested = true"
+            " WHERE kind = %s AND status IN ('queued','running')"
+            "   AND NOT cancel_requested RETURNING id", (kind,))
+        return [int(r[0]) for r in cur.fetchall()]
+    finally:
+        cur.close()
+
+
 def enqueue_race_day(conn, date: str, flow_args_json: str, *,
                      requested_by: str = "hro-orchestrator") -> int:
     """race_day を投入する。args は UI から渡しているものと同じ形。"""
