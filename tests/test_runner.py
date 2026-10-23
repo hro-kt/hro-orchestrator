@@ -127,6 +127,7 @@ def test_unreadable_power_state_is_treated_as_running(monkeypatch):
     monkeypatch.setattr(R.dbmod, "live_agents", lambda c, **k: {})
     monkeypatch.setattr(R.dbmod, "job_status", lambda c, d: {})
     monkeypatch.setattr(R.dbmod, "busy_by_target", lambda c: {})
+    monkeypatch.setattr(R.dbmod, "race_count", lambda c, d: 0)
     st = R.collect(object(), _Az(fail_read=True), _cfg(),
                    now=datetime(2026, 10, 24, 12, tzinfo=JST))
     v = st.vms[_cfg().policy.windows_vm]
@@ -140,6 +141,7 @@ def test_tick_is_idempotent(monkeypatch):
     monkeypatch.setattr(R.dbmod, "live_agents", lambda c, **k: {})
     monkeypatch.setattr(R.dbmod, "job_status", lambda c, d: {})
     monkeypatch.setattr(R.dbmod, "busy_by_target", lambda c: {})
+    monkeypatch.setattr(R.dbmod, "race_count", lambda c, d: 0)
     az = _Az(running=False)
     now = datetime(2026, 10, 24, 12, tzinfo=JST)
     a = R.tick(object(), az, _cfg(), now=now)
@@ -170,13 +172,18 @@ def test_execute_contains_no_policy():
 
 
 def test_all_time_policy_lives_in_plan():
-    """時刻の計算(いつ何をするか)は plan にしか無いこと。"""
+    """★「いつ何をするか」の**判断**は plan にしか無いこと。
+
+    runner が日付を組み立てるのは構わない(状態を集めるため)。
+    禁じたいのは、policy の値(リード時間・停止の猶予)を runner が解釈すること。
+    """
     base = Path(__file__).resolve().parents[1] / "hro_orchestrator"
     plan_src = (base / "plan.py").read_text(encoding="utf-8")
     run_src = (base / "runner.py").read_text(encoding="utf-8")
     assert "timedelta(" in plan_src
-    # runner が時刻演算を持たない(now() の取得だけは許す)
-    assert "timedelta(" not in run_src, "runner に時刻の判断が漏れている"
+    for knob in ("start_lead_hours", "enqueue_lead_hours",
+                 "stop_after_minutes", "agent_wait_minutes"):
+        assert knob not in run_src, f"runner が {knob} を解釈している"
 
 
 # --------------------------------------------------------------------------- #
@@ -210,6 +217,7 @@ def test_a_transitioning_vm_is_left_alone(monkeypatch):
     monkeypatch.setattr(R.dbmod, "live_agents", lambda c, **k: {})
     monkeypatch.setattr(R.dbmod, "job_status", lambda c, d: {})
     monkeypatch.setattr(R.dbmod, "busy_by_target", lambda c: {})
+    monkeypatch.setattr(R.dbmod, "race_count", lambda c, d: 0)
     for raw in ("VM starting", "VM deallocating", "VM stopping"):
         az = _AzTrans(raw)
         out = R.tick(object(), az, _cfg(),

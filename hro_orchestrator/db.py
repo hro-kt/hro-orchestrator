@@ -115,6 +115,12 @@ def posts(conn, date: str) -> tuple[datetime | None, datetime | None, int]:
     return _hhmm(date, first), _hhmm(date, last), int(n or 0)
 
 
+def race_count(conn, date: str) -> int:
+    """その日(YYYYMMDD)の中央のレース数。★開催日判定の素。"""
+    r = _rows(conn, _SQL_POSTS, (date[:4], date[4:8]))
+    return int(r[0][2] or 0) if r else 0
+
+
 def job_status(conn, date: str) -> dict[str, str | None]:
     """その日(JST)に投入されたジョブの、kind ごとの最新状態。"""
     start = datetime(int(date[:4]), int(date[4:6]), int(date[6:8]), tzinfo=JST)

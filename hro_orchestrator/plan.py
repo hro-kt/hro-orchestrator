@@ -58,6 +58,9 @@ class DayState:
     jobs: dict[str, str | None] = field(default_factory=dict)
     # target -> その機で queued|running のジョブ数
     busy: dict[str, int] = field(default_factory=dict)
+    # ★翌日のレース数(nl_ra)。0 のまま開催日を迎えると、司令塔は
+    #   「今日は非開催日」と判断して VM を起こさない。前日に気づきたい。
+    tomorrow_races: int = 0
 
 
 @dataclass(frozen=True)
@@ -75,6 +78,8 @@ class Policy:
     stop_after_minutes: float = 30.0
     # race_day を投入するのは第1発走のこれだけ前から
     enqueue_lead_hours: float = 2.0
+    # 翌日が土日なのに nl_ra に1レースも無ければ鳴らす(RACE データが古い)
+    warn_stale_race_data: bool = True
 
 
 _LIVE = ("queued", "running")
@@ -142,26 +147,53 @@ def plan(st: DayState, pol: Policy = Policy()) -> list[Action]:
     return acts
 
 
+def _stale_race_data(st: DayState, pol: Policy) -> list[Action]:
+    """翌日が土日なのに nl_ra にレースが無い = RACE データが古い。
+
+    ★司令塔は nl_ra を見て開催日を判断する。古いままだと
+      「今日は非開催日」として**VM を起こさず、一日が静かに終わる**。
+      しかも fetch_race は JV-Link(Windows VM)が要るので、気づくのが
+      当日では遅い。前日のうちに鳴らす。
+    ★平日は判定しない。JRA の出走表は週後半に配信されるので、
+      月〜水に「将来のレースが無い」のは正常。
+    """
+    if not pol.warn_stale_race_data:
+        return []
+    tomorrow = st.now + timedelta(days=1)
+    if tomorrow.weekday() not in (5, 6):        # 土=5 日=6
+        return []
+    if st.tomorrow_races > 0:
+        return []
+    return [Action(ALERT, "nl_ra",
+                   f"明日({tomorrow:%m/%d})は土日ですが nl_ra にレースがありません。"
+                   "RACE データが古いと、司令塔は明日を非開催日と判断して "
+                   "VM を起こしません。今日のうちに fetch_race を流してください"
+                   "(JV-Link が要るので Windows VM が動いている必要があります)")]
+
+
 def _plan_idle(st: DayState, pol: Policy, win: VmState | None) -> list[Action]:
     """非開催日。基本は止まっているべきだが、仕事があるなら起こす。"""
+    acts = _stale_race_data(st, pol)
     busy = st.busy.get(pol.windows_target, 0)
     if win is None:
-        return []
+        return acts
     if not win.running:
         # ★止めるだけでは片手落ち。VM が止まっている間に admin から
         #   Windows 宛のジョブ(sync_all / settle / close_day 等)を投入すると、
         #   拾う agent が居らず**永久に queued のまま**になる。
         #   「誰も気づかないまま何も起きない」は、この系で一番高くつく壊れ方。
         if busy:
-            return [Action(START_VM, pol.windows_vm,
-                           f"{pol.windows_target} 宛のジョブが {busy} 件待っています")]
-        return []
+            acts.append(Action(START_VM, pol.windows_vm,
+                               f"{pol.windows_target} 宛のジョブが {busy} 件待っています"))
+        return acts
     if busy:
         # ★走っているものがあるなら止めない。開催日でなくても、
         #   後日の決済や同期が回っていることがある。
-        return [Action(WAIT, pol.windows_vm,
-                       f"非開催日ですが {busy} 件のジョブが待機/実行中です。止めません")]
-    return [Action(STOP_VM, pol.windows_vm, "非開催日で、待っているジョブもありません")]
+        acts.append(Action(WAIT, pol.windows_vm,
+                           f"非開催日ですが {busy} 件のジョブが待機/実行中です。止めません"))
+        return acts
+    acts.append(Action(STOP_VM, pol.windows_vm, "非開催日で、待っているジョブもありません"))
+    return acts
 
 
 def _plan_stop(st: DayState, pol: Policy, win: VmState | None) -> list[Action]:

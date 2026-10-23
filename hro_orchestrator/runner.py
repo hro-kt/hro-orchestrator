@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from . import db as dbmod
 from .azure_vm import AzureVms
@@ -49,7 +49,11 @@ def collect(conn, az: AzureVms, cfg: Config, *, now: datetime | None = None) -> 
         vms={pol.windows_vm: VmState(pol.windows_vm, running, power, transitioning)},
         agents=dbmod.live_agents(conn),
         jobs=dbmod.job_status(conn, date),
-        busy=dbmod.busy_by_target(conn))
+        busy=dbmod.busy_by_target(conn),
+        # ★翌日の分も見る。nl_ra が古いまま開催日を迎えると、司令塔は
+        #   「非開催日」と判断して VM を起こさない。前日に気づきたい。
+        tomorrow_races=dbmod.race_count(
+            conn, (now + timedelta(days=1)).strftime("%Y%m%d")))
 
 
 def execute(conn, az: AzureVms, cfg: Config, actions: list[Action], *,

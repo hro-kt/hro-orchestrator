@@ -26,14 +26,14 @@ def _at(h, m=0):
 
 
 def _state(now, *, race_day=True, running=False, agent=False,
-           jobs=None, busy=None, first=10, last=16):
+           jobs=None, busy=None, first=10, last=16, tomorrow=36):
     return DayState(
         now=now, date="20261024", is_race_day=race_day,
         first_post=_at(first) if race_day else None,
         last_post=_at(last) if race_day else None,
         vms={WIN: VmState(WIN, running)},
         agents={"windows": agent},
-        jobs=jobs or {}, busy=busy or {})
+        jobs=jobs or {}, busy=busy or {}, tomorrow_races=tomorrow)
 
 
 def kinds(acts):
@@ -229,6 +229,40 @@ def test_jobs_for_another_machine_do_not_wake_windows():
     acts = plan(_state(_at(12), race_day=False, running=False,
                        busy={"vm": 3}), POL)
     assert acts == []
+
+
+# --------------------------------------------------------------------------- #
+# ★前日に「RACE データが古い」と気づく
+# --------------------------------------------------------------------------- #
+def test_warns_when_tomorrow_is_a_weekend_but_nl_ra_is_empty():
+    """★司令塔は nl_ra を見て開催日を判断する。古いままだと
+       「今日は非開催日」として**VM を起こさず、一日が静かに終わる**。
+       fetch_race は JV-Link(Windows VM)が要るので、当日では遅い。
+    """
+    # 2026-10-24 は金曜。翌日は土曜
+    acts = plan(_state(_at(12), race_day=False, running=False, tomorrow=0), POL)
+    assert ALERT in kinds(acts)
+    a = [x for x in acts if x.kind == ALERT][0]
+    assert "nl_ra にレースがありません" in a.reason
+    assert "fetch_race" in a.reason
+
+
+def test_no_warning_when_tomorrow_has_races():
+    acts = plan(_state(_at(12), race_day=False, running=False, tomorrow=36), POL)
+    assert ALERT not in kinds(acts)
+
+
+def test_no_warning_on_weekdays():
+    """★JRA の出走表は週後半に配信される。月〜水に将来のレースが無いのは正常。"""
+    st = _state(_at(12), race_day=False, running=False, tomorrow=0)
+    st.now = datetime(2026, 10, 20, 12, tzinfo=JST)     # 月曜 → 翌日は火曜
+    assert ALERT not in kinds(plan(st, POL))
+
+
+def test_the_warning_does_not_block_stopping_the_vm():
+    """★鳴らすのと止めるのは別。警告で電源管理を止めない。"""
+    acts = plan(_state(_at(12), race_day=False, running=True, tomorrow=0), POL)
+    assert ALERT in kinds(acts) and STOP_VM in kinds(acts)
 
 
 def test_waking_and_stopping_never_happen_together():
