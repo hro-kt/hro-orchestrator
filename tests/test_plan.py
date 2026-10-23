@@ -239,7 +239,7 @@ def test_warns_when_tomorrow_is_a_weekend_but_nl_ra_is_empty():
        「今日は非開催日」として**VM を起こさず、一日が静かに終わる**。
        fetch_race は JV-Link(Windows VM)が要るので、当日では遅い。
     """
-    # 2026-10-24 は金曜。翌日は土曜
+    # 2026-10-24 は土曜。翌日(10-25)は日曜 → 週末なのにレース 0 件
     acts = plan(_state(_at(12), race_day=False, running=False, tomorrow=0), POL)
     assert ALERT in kinds(acts)
     a = [x for x in acts if x.kind == ALERT][0]
@@ -255,7 +255,7 @@ def test_no_warning_when_tomorrow_has_races():
 def test_no_warning_on_weekdays():
     """★JRA の出走表は週後半に配信される。月〜水に将来のレースが無いのは正常。"""
     st = _state(_at(12), race_day=False, running=False, tomorrow=0)
-    st.now = datetime(2026, 10, 20, 12, tzinfo=JST)     # 月曜 → 翌日は火曜
+    st.now = datetime(2026, 10, 20, 12, tzinfo=JST)     # 火曜 → 翌日は水曜
     assert ALERT not in kinds(plan(st, POL))
 
 
